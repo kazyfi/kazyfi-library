@@ -1,21 +1,86 @@
 @import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
 
 @theme {
-  --font-display: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
-  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-sans: "Helvetica Neue", Helvetica, Arial, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
 }
 
 @layer base {
+  html {
+    font-size: 16px;
+    font-family: var(--font-sans);
+  }
+
+  html.a11y-scale-lg {
+    font-size: 18px;
+  }
+
+  html.a11y-scale-xl {
+    font-size: 20px;
+  }
+
   body {
     font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    transition: background-color 180ms ease, color 180ms ease;
+  }
+
+  html.a11y-dyslexia body {
+    letter-spacing: 0.03em;
+    word-spacing: 0.12em;
+    line-height: 1.75;
+  }
+
+  html.a11y-contrast body {
+    --tw-border-opacity: 1;
+  }
+
+  html.a11y-contrast .border-slate-200,
+  html.a11y-contrast .border-slate-200\/90 {
+    border-color: #64748b;
+  }
+
+  html.dark.a11y-contrast .dark\:border-slate-800 {
+    border-color: #94a3b8;
   }
 
   h1, h2, h3, .font-display {
     font-family: var(--font-display);
+    letter-spacing: -0.02em;
   }
 }
 
 .tabular-nums {
   font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media print {
+  aside, header, .no-print {
+    display: none !important;
+  }
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+  main {
+    padding: 0 !important;
+    margin: 0 !important;
+    max-width: 100% !important;
+  }
+  .barcode-sticker {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
 }

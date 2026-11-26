@@ -23,7 +23,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`PustakaLoka server listening on http://localhost:${PORT}`);
+    console.log(`Kazyfi Library server listening on http://localhost:${PORT}`);
   });
 }
 

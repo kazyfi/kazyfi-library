@@ -8,6 +8,7 @@ import type {
   AutomatedReport,
   Book,
   BookCategory,
+  BookReview,
   CategoryDistributionPoint,
   DailyCirculationPoint,
   LibraryStatistics,
@@ -16,6 +17,7 @@ import type {
   ReportFrequency,
   ReportKind,
   ReportSchedule,
+  Reservation,
   UserRole,
 } from '../src/types/library.ts';
 
@@ -25,18 +27,28 @@ const FINE_PER_DAY = 2000;
 const MAX_ACTIVE_LOANS_PER_MEMBER = 3;
 const IS_VERCEL = process.env.VERCEL === '1';
 const DATA_DIR = IS_VERCEL
-  ? path.resolve('/tmp', 'pustakaloka-data')
+  ? path.resolve('/tmp', 'kazyfi-library-data')
   : path.resolve(process.cwd(), 'data');
 const DB_FILE = path.resolve(DATA_DIR, 'library-db.json');
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+
+interface AdminCredential {
+  username: string;
+  passwordHash: string;
+  salt: string;
+  updatedAt: string;
+}
 
 interface DatabaseState {
   books: Book[];
   members: Member[];
   loans: Loan[];
+  reservations: Reservation[];
+  reviews: BookReview[];
   activities: ActivityEvent[];
   reports: AutomatedReport[];
   reportSchedule: ReportSchedule;
+  adminCredential?: AdminCredential | null;
 }
 
 interface SessionPayload {
@@ -60,6 +72,25 @@ const VALID_CATEGORIES: BookCategory[] = [
   'Ekonomi & Bisnis',
   'Sains & Astronomi',
 ];
+
+const DEFAULT_EXCERPTS: Record<string, string> = {
+  'bk-001':
+    'Bab 1 — Cakrawala Bahari: Sebelum peta-peta modern digambar dengan proyeksi garis lintang, para pelaut Nusantara membaca arah angin muson, warna arus selat, dan gugus bintang sebagai satu sistem pengetahuan hidup yang diwariskan lintas generasi.',
+  'bk-002':
+    'Bab 1 — Bernapas Bersama Iklim: Bangunan di garis khatulistiwa tidak dirancang untuk melawan matahari dan hujan tropis, melainkan bernegosiasi melalui teritisan lebar, kisi-kisi kayu yang menyaring silau, serta halaman dalam yang mengalirkan udara sejuk.',
+  'bk-003':
+    'Bab 1 — Konsistensi dalam Skala Besar: Ketika jutaan permintaan datang bersamaan ke simpul yang tersebar secara geografis, keandalan sistem bukan lagi sekadar soal kecepatan prosesor, melainkan bagaimana struktur data menjaga keteraturan tanpa mengorbankan ketersediaan.',
+  'bk-004':
+    'Bagian Pertama — Laci Arsip Nomor Tujuh: Setiap sore pukul lima, ketika kapal penyeberangan terakhir merapat di dermaga barat, Damar membuka laci arsip kayu jati dan menata surat-surat lama yang tintanya masih menyimpan bau garam laut.',
+  'bk-005':
+    'Bab 1 — Melampaui Ekonomi Linear: Selama satu abad terakhir, industri beroperasi dalam pola ambil-olah-buang. Model sirkular membalik logika tersebut dengan memperlakukan limbah sebagai bahan baku bernilai tinggi yang memperpanjang umur ekosistem.',
+  'bk-006':
+    'Bab 1 — Mengukur Jarak Bintang: Cahaya yang menyentuh lensa observatorium malam ini telah menempuh perjalanan ribuan tahun melintasi ruang hampa, membawa rekaman komposisi kimia dan sejarah evolusi galaksi jauh.',
+  'bk-007':
+    'Bab 1 — Arsitektur Berbasis Kejadian: Dalam sistem informasi modern, mencatat perubahan keadaan sebagai aliran kejadian yang tidak dapat diubah memberi transparansi audit penuh sekaligus memampukan pembaruan antarmuka secara seketika.',
+  'bk-008':
+    'Bab 1 — Ruang Bersama di Tengah Kota: Alun-alun, selasar pasar, dan taman tepi sungai di Asia Tenggara selalu menjadi ruang demokratis tempat warga lintas usia dan latar belakang bertemu tanpa sekat ekonomi.',
+};
 
 function daysFromNow(offsetDays: number): string {
   const date = new Date();
@@ -86,7 +117,9 @@ function reconcileLoansAndBooks(state: DatabaseState): void {
     const lateDays = calculateDaysLate(loan.dueAt, now);
     if (lateDays > 0) {
       loan.status = 'overdue';
-      loan.fineAmount = lateDays * FINE_PER_DAY;
+      if (!loan.finePaid) {
+        loan.fineAmount = lateDays * FINE_PER_DAY;
+      }
     } else {
       loan.status = 'active';
       loan.fineAmount = 0;
@@ -94,9 +127,25 @@ function reconcileLoansAndBooks(state: DatabaseState): void {
     activeCountByBook.set(loan.bookId, (activeCountByBook.get(loan.bookId) ?? 0) + 1);
   }
 
+  const reviewStats = new Map<string, { sum: number; count: number }>();
+  for (const rev of state.reviews) {
+    const prev = reviewStats.get(rev.bookId) ?? { sum: 0, count: 0 };
+    prev.sum += rev.rating;
+    prev.count += 1;
+    reviewStats.set(rev.bookId, prev);
+  }
+
   for (const book of state.books) {
     const activeBorrowed = activeCountByBook.get(book.id) ?? 0;
     book.availableCopies = Math.max(0, book.totalCopies - activeBorrowed);
+    if (!book.sampleExcerpt) {
+      book.sampleExcerpt =
+        DEFAULT_EXCERPTS[book.id] ||
+        `Cuplikan Pembuka — ${book.title}: ${book.synopsis}`;
+    }
+    const rStat = reviewStats.get(book.id);
+    book.ratingCount = rStat?.count ?? 0;
+    book.ratingAvg = rStat && rStat.count > 0 ? Number((rStat.sum / rStat.count).toFixed(1)) : 0;
   }
 }
 
@@ -109,6 +158,9 @@ function computeStatistics(state: DatabaseState): LibraryStatistics {
   const overdueLoans = state.loans.filter((l) => l.status === 'overdue');
   const returnedLoans = state.loans.filter((l) => l.status === 'returned');
   const activeMembersCount = state.members.filter((m) => m.status === 'active').length;
+  const waitingReservationsCount = state.reservations.filter(
+    (r) => r.status === 'waiting' || r.status === 'ready'
+  ).length;
 
   const borrowedCopies = Math.max(0, totalCopies - availableCopies);
   const utilizationRate = totalCopies > 0 ? Math.round((borrowedCopies / totalCopies) * 100) : 0;
@@ -117,7 +169,9 @@ function computeStatistics(state: DatabaseState): LibraryStatistics {
   const onTimeReturnRate =
     returnedLoans.length > 0 ? Math.round((onTimeReturns / returnedLoans.length) * 100) : 100;
 
-  const totalOutstandingFines = overdueLoans.reduce((sum, l) => sum + l.fineAmount, 0);
+  const totalOutstandingFines = state.loans
+    .filter((l) => !l.finePaid && l.fineAmount > 0)
+    .reduce((sum, l) => sum + l.fineAmount, 0);
 
   const dailyTrend: DailyCirculationPoint[] = [];
   const dayFormatter = new Intl.DateTimeFormat('id-ID', { weekday: 'short', day: 'numeric' });
@@ -187,6 +241,7 @@ function computeStatistics(state: DatabaseState): LibraryStatistics {
     overdueLoansCount: overdueLoans.length,
     returnedLoansCount: returnedLoans.length,
     activeMembersCount,
+    waitingReservationsCount,
     utilizationRate,
     onTimeReturnRate,
     totalOutstandingFines,
@@ -284,6 +339,7 @@ function createInitialSeedState(): DatabaseState {
       coverUrl: '/src/assets/images/cover_filsafat_nusantara_1795659500953.jpg',
       synopsis:
         'Penelusuran mendalam mengenai perkembangan gagasan maritim, etika sosial, dan tradisi intelektual di kepulauan Nusantara dari abad ke-14 hingga era modern.',
+      sampleExcerpt: DEFAULT_EXCERPTS['bk-001'],
       borrowCount: 28,
       createdAt: daysFromNow(-120),
     },
@@ -301,6 +357,7 @@ function createInitialSeedState(): DatabaseState {
       coverUrl: '/src/assets/images/cover_arsitektur_tropis_1795659501240.jpg',
       synopsis:
         'Kajian prinsip ventilasi silang, pencahayaan alami, serta material lokal berkelanjutan dalam perancangan ruang publik dan hunian iklim khatulistiwa.',
+      sampleExcerpt: DEFAULT_EXCERPTS['bk-002'],
       borrowCount: 19,
       createdAt: daysFromNow(-95),
     },
@@ -318,6 +375,7 @@ function createInitialSeedState(): DatabaseState {
       coverUrl: '/src/assets/images/cover_algoritma_data_1795659501461.jpg',
       synopsis:
         'Panduan praktis perancangan struktur graf, indeks pencarian, konsistensi terdistribusi, serta optimasi komputasi berskala besar.',
+      sampleExcerpt: DEFAULT_EXCERPTS['bk-003'],
       borrowCount: 34,
       createdAt: daysFromNow(-80),
     },
@@ -335,6 +393,7 @@ function createInitialSeedState(): DatabaseState {
       coverUrl: '/src/assets/images/cover_sastra_senja_1795659501618.jpg',
       synopsis:
         'Novel sastra tentang perjalanan seorang pustakawan pesisir yang merawat arsip surat-surat tua dan ingatan kolektif kota pelabuhan.',
+      sampleExcerpt: DEFAULT_EXCERPTS['bk-004'],
       borrowCount: 25,
       createdAt: daysFromNow(-70),
     },
@@ -352,6 +411,7 @@ function createInitialSeedState(): DatabaseState {
       coverUrl: '/src/assets/images/cover_ekonomi_hijau_1795659501820.jpg',
       synopsis:
         'Analisis transisi energi, rantai pasok rendah karbon, dan instrumen pembiayaan berkelanjutan untuk negara berkembang.',
+      sampleExcerpt: DEFAULT_EXCERPTS['bk-005'],
       borrowCount: 16,
       createdAt: daysFromNow(-55),
     },
@@ -369,6 +429,7 @@ function createInitialSeedState(): DatabaseState {
       coverUrl: '/src/assets/images/cover_astronomi_kosmos_1795659502173.jpg',
       synopsis:
         'Pengantar astrofisika observasional, dinamika orbit planet, dan pemetaan katalog bintang di belahan langit selatan.',
+      sampleExcerpt: DEFAULT_EXCERPTS['bk-006'],
       borrowCount: 21,
       createdAt: daysFromNow(-40),
     },
@@ -386,6 +447,7 @@ function createInitialSeedState(): DatabaseState {
       coverUrl: '/src/assets/images/cover_algoritma_data_1795659501461.jpg',
       synopsis:
         'Membahas pemodelan data transaksional, replikasi real-time, serta strategi audit log untuk sistem informasi organisasi.',
+      sampleExcerpt: DEFAULT_EXCERPTS['bk-007'],
       borrowCount: 22,
       createdAt: daysFromNow(-30),
     },
@@ -403,6 +465,7 @@ function createInitialSeedState(): DatabaseState {
       coverUrl: '/src/assets/images/cover_arsitektur_tropis_1795659501240.jpg',
       synopsis:
         'Studi komparatif ruang terbuka hijau, koridor pejalan kaki, dan revitalisasi kawasan bersejarah di kota-kota Asia Tenggara.',
+      sampleExcerpt: DEFAULT_EXCERPTS['bk-008'],
       borrowCount: 12,
       createdAt: daysFromNow(-20),
     },
@@ -413,36 +476,40 @@ function createInitialSeedState(): DatabaseState {
       id: 'mem-001',
       memberCode: 'AGT-2026-001',
       name: 'Budi Santoso',
-      email: 'budi.santoso@pustakaloka.id',
+      email: 'budi.santoso@kazyfilibrary.id',
       department: 'Teknik Informatika',
       status: 'active',
+      bookmarkIds: ['bk-002', 'bk-006'],
       joinedAt: daysFromNow(-180),
     },
     {
       id: 'mem-002',
       memberCode: 'AGT-2026-002',
       name: 'Nadia Putri',
-      email: 'nadia.putri@pustakaloka.id',
+      email: 'nadia.putri@kazyfilibrary.id',
       department: 'Arsitektur',
       status: 'active',
+      bookmarkIds: ['bk-001', 'bk-008'],
       joinedAt: daysFromNow(-145),
     },
     {
       id: 'mem-003',
       memberCode: 'AGT-2026-003',
       name: 'Raka Pratama',
-      email: 'raka.pratama@pustakaloka.id',
+      email: 'raka.pratama@kazyfilibrary.id',
       department: 'Ilmu Ekonomi',
       status: 'active',
+      bookmarkIds: ['bk-005'],
       joinedAt: daysFromNow(-90),
     },
     {
       id: 'mem-004',
       memberCode: 'AGT-2026-004',
       name: 'Dewi Anggraini',
-      email: 'dewi.anggraini@pustakaloka.id',
+      email: 'dewi.anggraini@kazyfilibrary.id',
       department: 'Sastra Indonesia',
       status: 'active',
+      bookmarkIds: ['bk-004'],
       joinedAt: daysFromNow(-60),
     },
   ];
@@ -463,6 +530,7 @@ function createInitialSeedState(): DatabaseState {
       returnedAt: null,
       extendedCount: 0,
       fineAmount: 0,
+      finePaid: false,
       status: 'active',
     },
     {
@@ -480,6 +548,7 @@ function createInitialSeedState(): DatabaseState {
       returnedAt: null,
       extendedCount: 0,
       fineAmount: 6000,
+      finePaid: false,
       status: 'overdue',
     },
     {
@@ -497,6 +566,7 @@ function createInitialSeedState(): DatabaseState {
       returnedAt: null,
       extendedCount: 0,
       fineAmount: 0,
+      finePaid: false,
       status: 'active',
     },
     {
@@ -514,6 +584,7 @@ function createInitialSeedState(): DatabaseState {
       returnedAt: null,
       extendedCount: 0,
       fineAmount: 0,
+      finePaid: false,
       status: 'active',
     },
     {
@@ -531,6 +602,7 @@ function createInitialSeedState(): DatabaseState {
       returnedAt: null,
       extendedCount: 0,
       fineAmount: 4000,
+      finePaid: false,
       status: 'overdue',
     },
     {
@@ -548,6 +620,7 @@ function createInitialSeedState(): DatabaseState {
       returnedAt: null,
       extendedCount: 1,
       fineAmount: 0,
+      finePaid: false,
       status: 'active',
     },
     {
@@ -565,6 +638,7 @@ function createInitialSeedState(): DatabaseState {
       returnedAt: null,
       extendedCount: 0,
       fineAmount: 0,
+      finePaid: false,
       status: 'active',
     },
     {
@@ -582,6 +656,7 @@ function createInitialSeedState(): DatabaseState {
       returnedAt: null,
       extendedCount: 0,
       fineAmount: 0,
+      finePaid: false,
       status: 'active',
     },
     {
@@ -599,6 +674,7 @@ function createInitialSeedState(): DatabaseState {
       returnedAt: daysFromNow(-1),
       extendedCount: 0,
       fineAmount: 0,
+      finePaid: false,
       status: 'returned',
     },
     {
@@ -616,6 +692,7 @@ function createInitialSeedState(): DatabaseState {
       returnedAt: daysFromNow(-2),
       extendedCount: 0,
       fineAmount: 0,
+      finePaid: false,
       status: 'returned',
     },
     {
@@ -633,6 +710,7 @@ function createInitialSeedState(): DatabaseState {
       returnedAt: daysFromNow(0),
       extendedCount: 0,
       fineAmount: 0,
+      finePaid: false,
       status: 'returned',
     },
     {
@@ -650,9 +728,51 @@ function createInitialSeedState(): DatabaseState {
       returnedAt: daysFromNow(0),
       extendedCount: 0,
       fineAmount: 0,
+      finePaid: false,
       status: 'returned',
     },
   ];
+
+  const reviews: BookReview[] = [
+    {
+      id: 'rev-001',
+      bookId: 'bk-001',
+      memberId: 'mem-002',
+      memberName: 'Nadia Putri',
+      rating: 5,
+      comment: 'Referensi sejarah intelektual Nusantara yang sangat jernih dan tertata rapi.',
+      createdAt: daysFromNow(-12),
+    },
+    {
+      id: 'rev-002',
+      bookId: 'bk-003',
+      memberId: 'mem-001',
+      memberName: 'Budi Santoso',
+      rating: 5,
+      comment: 'Penjelasan graf terdistribusi mudah dipahami dan langsung relevan dengan praktik.',
+      createdAt: daysFromNow(-8),
+    },
+    {
+      id: 'rev-003',
+      bookId: 'bk-004',
+      memberId: 'mem-003',
+      memberName: 'Raka Pratama',
+      rating: 4,
+      comment: 'Prosa yang tenang dan puitis, cocok dibaca pada akhir pekan.',
+      createdAt: daysFromNow(-2),
+    },
+    {
+      id: 'rev-004',
+      bookId: 'bk-006',
+      memberId: 'mem-001',
+      memberName: 'Budi Santoso',
+      rating: 5,
+      comment: 'Ilustrasi mekanika orbitnya membantu memahami peta langit selatan.',
+      createdAt: daysFromNow(-1),
+    },
+  ];
+
+  const reservations: Reservation[] = [];
 
   const activities: ActivityEvent[] = [
     {
@@ -705,9 +825,12 @@ function createInitialSeedState(): DatabaseState {
     books,
     members,
     loans,
+    reservations,
+    reviews,
     activities,
     reports: [],
     reportSchedule,
+    adminCredential: null,
   };
 
   reconcileLoansAndBooks(initialState);
@@ -716,6 +839,41 @@ function createInitialSeedState(): DatabaseState {
   );
 
   return initialState;
+}
+
+function normalizeLoadedState(rawState: Partial<DatabaseState>): DatabaseState {
+  const seed = createInitialSeedState();
+  const rawAdmin = rawState.adminCredential;
+  const adminCredential: AdminCredential | null =
+    rawAdmin &&
+    typeof rawAdmin.username === 'string' &&
+    typeof rawAdmin.passwordHash === 'string' &&
+    typeof rawAdmin.salt === 'string'
+      ? rawAdmin
+      : null;
+  const state: DatabaseState = {
+    books: Array.isArray(rawState.books) ? rawState.books : seed.books,
+    members: Array.isArray(rawState.members)
+      ? rawState.members.map((m) => ({
+          ...m,
+          bookmarkIds: Array.isArray(m.bookmarkIds) ? m.bookmarkIds : [],
+        }))
+      : seed.members,
+    loans: Array.isArray(rawState.loans)
+      ? rawState.loans.map((l) => ({
+          ...l,
+          finePaid: Boolean(l.finePaid),
+        }))
+      : seed.loans,
+    reservations: Array.isArray(rawState.reservations) ? rawState.reservations : [],
+    reviews: Array.isArray(rawState.reviews) ? rawState.reviews : seed.reviews,
+    activities: Array.isArray(rawState.activities) ? rawState.activities : seed.activities,
+    reports: Array.isArray(rawState.reports) ? rawState.reports : seed.reports,
+    reportSchedule: rawState.reportSchedule ?? seed.reportSchedule,
+    adminCredential,
+  };
+  reconcileLoansAndBooks(state);
+  return state;
 }
 
 function loadDatabase(): DatabaseState {
@@ -727,9 +885,8 @@ function loadDatabase(): DatabaseState {
       return seeded;
     }
     const raw = fs.readFileSync(DB_FILE, 'utf-8');
-    const parsed = JSON.parse(raw) as DatabaseState;
-    reconcileLoansAndBooks(parsed);
-    return parsed;
+    const parsed = JSON.parse(raw) as Partial<DatabaseState>;
+    return normalizeLoadedState(parsed);
   } catch {
     return createInitialSeedState();
   }
@@ -812,6 +969,73 @@ function sanitizeText(input: unknown, maxLen: number): string {
   return input.trim().slice(0, maxLen);
 }
 
+function normalizeUsername(username: string): string {
+  return username.trim().toLowerCase();
+}
+
+function formatAdminDisplayName(username: string): string {
+  return (
+    username
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(' ') || 'Administrator'
+  );
+}
+
+function hashAdminPassword(password: string, salt: string): string {
+  return crypto.scryptSync(password, salt, 64).toString('hex');
+}
+
+function timingSafeStringEqual(a: string, b: string): boolean {
+  const digestA = crypto.createHmac('sha256', SESSION_SECRET).update(a, 'utf-8').digest();
+  const digestB = crypto.createHmac('sha256', SESSION_SECRET).update(b, 'utf-8').digest();
+  return crypto.timingSafeEqual(digestA, digestB);
+}
+
+function getAdminAuthConfig(state: DatabaseState): {
+  configured: boolean;
+  source: 'env' | 'claimed' | 'unconfigured';
+  envUsername?: string;
+  envPassword?: string;
+  claimed?: AdminCredential;
+} {
+  const envUsername = (process.env.ADMIN_USERNAME || '').trim();
+  const envPassword = process.env.ADMIN_PASSWORD || '';
+  if (envUsername && envPassword) {
+    return { configured: true, source: 'env', envUsername, envPassword };
+  }
+  if (
+    state.adminCredential?.username &&
+    state.adminCredential?.passwordHash &&
+    state.adminCredential?.salt
+  ) {
+    return { configured: true, source: 'claimed', claimed: state.adminCredential };
+  }
+  return { configured: false, source: 'unconfigured' };
+}
+
+function issueAdminSessionResponse(username: string) {
+  const payload: SessionPayload = {
+    role: 'admin',
+    userId: 'adm-001',
+    name: formatAdminDisplayName(username),
+    email: 'admin@kazyfilibrary.id',
+    code: 'ADMIN-KAZYFI',
+    exp: Date.now() + 1000 * 60 * 60 * 12,
+  };
+  const token = signSessionToken(payload);
+  return {
+    token,
+    role: payload.role,
+    userId: payload.userId,
+    name: payload.name,
+    email: payload.email,
+    code: payload.code,
+  };
+}
+
 export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) {
   const db = loadDatabase();
   const app = express();
@@ -849,21 +1073,27 @@ export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) 
     return event;
   }
 
-  function emitFullSync(eventName: string, activity?: ActivityEvent) {
+  function buildSyncPayload(eventName: string, activity?: ActivityEvent) {
     const stats = computeStatistics(db);
     saveDatabase(db);
-    const payload = {
+    return {
       eventName,
       activity,
       books: db.books,
       members: db.members,
       loans: db.loans,
+      reservations: db.reservations,
+      reviews: db.reviews,
       activities: db.activities,
       reports: db.reports,
       reportSchedule: db.reportSchedule,
       stats,
       connectedClients: Math.max(1, sseClients.size),
     };
+  }
+
+  function emitFullSync(eventName: string, activity?: ActivityEvent) {
+    const payload = buildSyncPayload(eventName, activity);
     broadcastEvent('sync', payload);
     return payload;
   }
@@ -888,26 +1118,103 @@ export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) 
     });
   });
 
+  app.get('/api/auth/admin-status', (_req: Request, res: Response) => {
+    const cfg = getAdminAuthConfig(db);
+    res.json({
+      configured: cfg.configured,
+      source: cfg.source,
+    });
+  });
+
+  app.post('/api/auth/admin-setup', (req: Request, res: Response) => {
+    const cfg = getAdminAuthConfig(db);
+    if (cfg.source !== 'unconfigured') {
+      res.status(409).json({
+        error: 'Akun admin sudah dikonfigurasi. Silakan masuk melalui menu Login Admin.',
+      });
+      return;
+    }
+
+    const rawUsername = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+    const rawPassword = typeof req.body?.password === 'string' ? req.body.password : '';
+
+    if (rawUsername.length < 3 || rawUsername.length > 64) {
+      res.status(400).json({ error: 'Username admin harus terdiri dari 3 hingga 64 karakter.' });
+      return;
+    }
+    if (rawPassword.length < 6 || rawPassword.length > 128) {
+      res.status(400).json({ error: 'Password admin harus terdiri dari 6 hingga 128 karakter.' });
+      return;
+    }
+
+    const salt = crypto.randomBytes(16).toString('hex');
+    const passwordHash = hashAdminPassword(rawPassword, salt);
+    db.adminCredential = {
+      username: rawUsername,
+      passwordHash,
+      salt,
+      updatedAt: new Date().toISOString(),
+    };
+    saveDatabase(db);
+
+    res.status(201).json(issueAdminSessionResponse(rawUsername));
+  });
+
+  app.post('/api/auth/admin-login', (req: Request, res: Response) => {
+    const cfg = getAdminAuthConfig(db);
+    if (!cfg.configured) {
+      res.status(409).json({
+        error: 'Akun admin belum diaktivasi. Lakukan aktivasi akun admin terlebih dahulu.',
+      });
+      return;
+    }
+
+    const rawUsername = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+    const rawPassword = typeof req.body?.password === 'string' ? req.body.password : '';
+
+    if (!rawUsername || !rawPassword) {
+      res.status(400).json({ error: 'Username dan password admin wajib diisi.' });
+      return;
+    }
+
+    let valid = false;
+    let displayUsername = rawUsername;
+
+    if (cfg.source === 'env' && cfg.envUsername && cfg.envPassword) {
+      const userOk = timingSafeStringEqual(
+        normalizeUsername(rawUsername),
+        normalizeUsername(cfg.envUsername)
+      );
+      const passOk = timingSafeStringEqual(rawPassword, cfg.envPassword);
+      valid = userOk && passOk;
+      displayUsername = cfg.envUsername;
+    } else if (cfg.source === 'claimed' && cfg.claimed) {
+      const userOk = timingSafeStringEqual(
+        normalizeUsername(rawUsername),
+        normalizeUsername(cfg.claimed.username)
+      );
+      const computedBuf = crypto.scryptSync(rawPassword, cfg.claimed.salt, 64);
+      const storedBuf = Buffer.from(cfg.claimed.passwordHash, 'hex');
+      const passOk =
+        computedBuf.length === storedBuf.length && crypto.timingSafeEqual(computedBuf, storedBuf);
+      valid = userOk && passOk;
+      displayUsername = cfg.claimed.username;
+    }
+
+    if (!valid) {
+      res.status(401).json({ error: 'Username atau password admin salah.' });
+      return;
+    }
+
+    res.json(issueAdminSessionResponse(displayUsername));
+  });
+
   app.post('/api/auth/session', (req: Request, res: Response) => {
     const { role, memberId } = req.body as { role?: UserRole; memberId?: string };
 
     if (role === 'admin') {
-      const payload: SessionPayload = {
-        role: 'admin',
-        userId: 'adm-001',
-        name: 'Siti Rahma',
-        email: 'admin@pustakaloka.id',
-        code: 'PUSTAKAWAN-01',
-        exp: Date.now() + 1000 * 60 * 60 * 12,
-      };
-      const token = signSessionToken(payload);
-      res.json({
-        token,
-        role: payload.role,
-        userId: payload.userId,
-        name: payload.name,
-        email: payload.email,
-        code: payload.code,
+      res.status(403).json({
+        error: 'Akses admin memerlukan autentikasi melalui menu Login Admin.',
       });
       return;
     }
@@ -947,6 +1254,8 @@ export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) 
       books: db.books,
       members: db.members,
       loans: db.loans,
+      reservations: db.reservations,
+      reviews: db.reviews,
       activities: db.activities,
       reports: db.reports,
       reportSchedule: db.reportSchedule,
@@ -963,7 +1272,12 @@ export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) 
     const shelfCode = sanitizeText(req.body.shelfCode, 24) || 'RAK-UMUM';
     const synopsis =
       sanitizeText(req.body.synopsis, 600) ||
-      'Koleksi pustaka terkurasi yang tersedia untuk peminjaman anggota PustakaLoka.';
+      'Koleksi pustaka terkurasi yang tersedia untuk peminjaman anggota Kazyfi Library.';
+    const sampleExcerpt =
+      sanitizeText(req.body.sampleExcerpt, 800) ||
+      `Cuplikan Pembuka — ${title}: ${synopsis}`;
+    const rawBarcode = sanitizeText(req.body.barcodeCode, 48).replace(/[^a-zA-Z0-9-]/g, '').toUpperCase();
+    const barcodeCode = rawBarcode || isbn.replace(/[^0-9A-Za-z]/g, '').toUpperCase();
     const category = VALID_CATEGORIES.includes(req.body.category)
       ? (req.body.category as BookCategory)
       : 'Teknologi & Data';
@@ -1000,7 +1314,11 @@ export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) 
       availableCopies: totalCopies,
       coverUrl: coverByCategory[category],
       synopsis,
+      sampleExcerpt,
+      barcodeCode,
       borrowCount: 0,
+      ratingAvg: 0,
+      ratingCount: 0,
       createdAt: new Date().toISOString(),
     };
 
@@ -1033,6 +1351,11 @@ export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) 
     const isbn = sanitizeText(req.body.isbn, 32) || book.isbn;
     const shelfCode = sanitizeText(req.body.shelfCode, 24) || book.shelfCode;
     const synopsis = sanitizeText(req.body.synopsis, 600) || book.synopsis;
+    const sampleExcerpt = sanitizeText(req.body.sampleExcerpt, 800) || book.sampleExcerpt;
+    const rawBarcode =
+      typeof req.body.barcodeCode === 'string'
+        ? sanitizeText(req.body.barcodeCode, 48).replace(/[^a-zA-Z0-9-]/g, '').toUpperCase()
+        : undefined;
     const category = VALID_CATEGORIES.includes(req.body.category)
       ? (req.body.category as BookCategory)
       : book.category;
@@ -1058,6 +1381,10 @@ export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) 
     book.isbn = isbn;
     book.shelfCode = shelfCode;
     book.synopsis = synopsis;
+    book.sampleExcerpt = sampleExcerpt;
+    if (rawBarcode !== undefined) {
+      book.barcodeCode = rawBarcode || isbn.replace(/[^0-9A-Za-z]/g, '').toUpperCase();
+    }
     book.category = category;
     book.year = year;
     book.totalCopies = requestedCopies;
@@ -1104,33 +1431,118 @@ export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) 
     res.json({ deletedId: book.id, sync });
   });
 
-  app.post('/api/members', requireAuth, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
-    const name = sanitizeText(req.body.name, 80);
-    const email = sanitizeText(req.body.email, 100);
-    const department = sanitizeText(req.body.department, 80) || 'Umum';
+  // Member Reviews
+  app.post('/api/books/:id/reviews', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const book = db.books.find((b) => b.id === req.params.id);
+    if (!book) {
+      res.status(404).json({ error: 'Buku tidak ditemukan.' });
+      return;
+    }
+    const ratingNum = Number(req.body.rating);
+    const rating = Number.isFinite(ratingNum) ? Math.min(5, Math.max(1, Math.round(ratingNum))) : 5;
+    const comment = sanitizeText(req.body.comment, 300);
 
-    if (!name || !email || !email.includes('@')) {
-      res.status(400).json({ error: 'Nama lengkap dan email anggota yang valid wajib diisi.' });
+    if (!comment || comment.length < 4) {
+      res.status(400).json({ error: 'Ulasan minimal 4 karakter.' });
       return;
     }
 
-    if (db.members.some((m) => m.email.toLowerCase() === email.toLowerCase())) {
+    const review: BookReview = {
+      id: `rev-${crypto.randomUUID().slice(0, 8)}`,
+      bookId: book.id,
+      memberId: req.session!.userId,
+      memberName: req.session!.name,
+      rating,
+      comment,
+      createdAt: new Date().toISOString(),
+    };
+    db.reviews.unshift(review);
+
+    const activity = recordActivity(
+      'review:created',
+      req.session!.name,
+      req.session!.role,
+      `Memberi ulasan (${rating}/5): ${book.title}`,
+      comment.slice(0, 80)
+    );
+    const sync = emitFullSync('review:created', activity);
+    res.status(201).json({ review, sync });
+  });
+
+  // Member Bookmarks
+  app.post('/api/members/:id/bookmarks', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const memberId = req.params.id;
+    if (req.session!.role !== 'admin' && req.session!.userId !== memberId) {
+      res.status(403).json({ error: 'Akses ditolak.' });
+      return;
+    }
+    const member = db.members.find((m) => m.id === memberId);
+    if (!member) {
+      res.status(404).json({ error: 'Anggota tidak ditemukan.' });
+      return;
+    }
+    const bookId = sanitizeText(req.body.bookId, 64);
+    if (!db.books.some((b) => b.id === bookId)) {
+      res.status(404).json({ error: 'Buku tidak ditemukan.' });
+      return;
+    }
+
+    const list = member.bookmarkIds ?? [];
+    const exists = list.includes(bookId);
+    member.bookmarkIds = exists ? list.filter((id) => id !== bookId) : [bookId, ...list];
+
+    const sync = emitFullSync('member:bookmark-updated');
+    res.json({ bookmarkIds: member.bookmarkIds, saved: !exists, sync });
+  });
+
+  // Member Registration & Status Management (Admin)
+  app.post('/api/members', requireAuth, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
+    const name = sanitizeText(req.body.name, 80);
+    const email = sanitizeText(req.body.email, 100).toLowerCase();
+    const department = sanitizeText(req.body.department, 80) || 'Umum';
+    const customCode = sanitizeText(req.body.memberCode, 32)
+      .replace(/[^a-zA-Z0-9-]/g, '')
+      .toUpperCase();
+    const status = req.body.status === 'suspended' ? 'suspended' : 'active';
+
+    if (!name || !email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      res.status(400).json({ error: 'Nama lengkap dan format email anggota yang valid wajib diisi.' });
+      return;
+    }
+
+    if (db.members.some((m) => m.email.toLowerCase() === email)) {
       res.status(409).json({ error: 'Email anggota sudah terdaftar.' });
       return;
     }
 
-    const nextNumber = String(db.members.length + 1).padStart(3, '0');
+    let memberCode = customCode;
+    if (!memberCode) {
+      let maxNum = db.members.length;
+      for (const m of db.members) {
+        const match = m.memberCode.match(/(\d+)$/);
+        if (match) {
+          const parsed = Number(match[1]);
+          if (Number.isFinite(parsed) && parsed > maxNum) maxNum = parsed;
+        }
+      }
+      memberCode = `AGT-2026-${String(maxNum + 1).padStart(3, '0')}`;
+    } else if (db.members.some((m) => m.memberCode.toUpperCase() === memberCode)) {
+      res.status(409).json({ error: `Kode anggota ${memberCode} sudah digunakan.` });
+      return;
+    }
+
     const newMember: Member = {
       id: `mem-${crypto.randomUUID().slice(0, 8)}`,
-      memberCode: `AGT-2026-${nextNumber}`,
+      memberCode,
       name,
       email,
       department,
-      status: 'active',
+      status,
+      bookmarkIds: [],
       joinedAt: new Date().toISOString(),
     };
 
-    db.members.push(newMember);
+    db.members.unshift(newMember);
     const activity = recordActivity(
       'member:created',
       req.session!.name,
@@ -1142,6 +1554,185 @@ export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) 
     res.status(201).json({ member: newMember, sync });
   });
 
+  app.put('/api/members/:id', requireAuth, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
+    const member = db.members.find((m) => m.id === req.params.id);
+    if (!member) {
+      res.status(404).json({ error: 'Anggota tidak ditemukan.' });
+      return;
+    }
+
+    const name = sanitizeText(req.body.name, 80) || member.name;
+    const email = (sanitizeText(req.body.email, 100) || member.email).toLowerCase();
+    const department = sanitizeText(req.body.department, 80) || member.department;
+    const status = req.body.status === 'suspended' ? 'suspended' : 'active';
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      res.status(400).json({ error: 'Format email anggota tidak valid.' });
+      return;
+    }
+
+    if (db.members.some((m) => m.id !== member.id && m.email.toLowerCase() === email)) {
+      res.status(409).json({ error: 'Email sudah digunakan oleh anggota lain.' });
+      return;
+    }
+
+    member.name = name;
+    member.email = email;
+    member.department = department;
+    member.status = status;
+
+    const activity = recordActivity(
+      'member:updated',
+      req.session!.name,
+      'admin',
+      `Memperbarui data anggota: ${member.name}`,
+      `${member.memberCode} · ${member.department}`
+    );
+    const sync = emitFullSync('member:updated', activity);
+    res.json({ member, sync });
+  });
+
+  app.delete('/api/members/:id', requireAuth, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
+    const idx = db.members.findIndex((m) => m.id === req.params.id);
+    if (idx === -1) {
+      res.status(404).json({ error: 'Anggota tidak ditemukan.' });
+      return;
+    }
+
+    const member = db.members[idx];
+    const hasActiveLoan = db.loans.some(
+      (l) => l.memberId === member.id && l.status !== 'returned'
+    );
+    if (hasActiveLoan) {
+      res.status(400).json({
+        error: 'Anggota tidak dapat dihapus karena masih memiliki peminjaman aktif atau tertunggak.',
+      });
+      return;
+    }
+
+    db.members.splice(idx, 1);
+    const activity = recordActivity(
+      'member:deleted',
+      req.session!.name,
+      'admin',
+      `Menghapus anggota: ${member.name}`,
+      `${member.memberCode} · ${member.department}`
+    );
+    const sync = emitFullSync('member:deleted', activity);
+    res.json({ deletedId: member.id, sync });
+  });
+
+  app.patch('/api/members/:id/status', requireAuth, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
+    const member = db.members.find((m) => m.id === req.params.id);
+    if (!member) {
+      res.status(404).json({ error: 'Anggota tidak ditemukan.' });
+      return;
+    }
+    const nextStatus = req.body.status === 'suspended' ? 'suspended' : 'active';
+    member.status = nextStatus;
+
+    const activity = recordActivity(
+      'member:status',
+      req.session!.name,
+      'admin',
+      `Mengubah status ${member.name}: ${nextStatus === 'active' ? 'Aktif' : 'Ditangguhkan'}`,
+      member.memberCode
+    );
+    const sync = emitFullSync('member:status', activity);
+    res.json({ member, sync });
+  });
+
+  // Reservations (Waitlist Queue)
+  app.post('/api/reservations', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const { bookId, memberId } = req.body as { bookId?: string; memberId?: string };
+    const targetMemberId = req.session!.role === 'admin' && memberId ? memberId : req.session!.userId;
+    const member = db.members.find((m) => m.id === targetMemberId);
+    if (!member) {
+      res.status(404).json({ error: 'Data anggota tidak ditemukan.' });
+      return;
+    }
+    if (member.status !== 'active') {
+      res.status(403).json({ error: 'Keanggotaan sedang ditangguhkan.' });
+      return;
+    }
+
+    const book = db.books.find((b) => b.id === bookId);
+    if (!book) {
+      res.status(404).json({ error: 'Buku tidak ditemukan.' });
+      return;
+    }
+
+    reconcileLoansAndBooks(db);
+    if (book.availableCopies > 0) {
+      res.status(400).json({ error: 'Buku masih tersedia, Anda dapat meminjam langsung.' });
+      return;
+    }
+
+    const duplicate = db.reservations.some(
+      (r) =>
+        r.bookId === book.id &&
+        r.memberId === member.id &&
+        (r.status === 'waiting' || r.status === 'ready')
+    );
+    if (duplicate) {
+      res.status(400).json({ error: 'Anda sudah berada dalam antrean reservasi buku ini.' });
+      return;
+    }
+
+    const resNum = String(db.reservations.length + 1).padStart(3, '0');
+    const reservation: Reservation = {
+      id: `res-${crypto.randomUUID().slice(0, 8)}`,
+      reservationCode: `RSV-2611-${resNum}`,
+      bookId: book.id,
+      bookTitle: book.title,
+      memberId: member.id,
+      memberName: member.name,
+      memberCode: member.memberCode,
+      status: 'waiting',
+      createdAt: new Date().toISOString(),
+      readyAt: null,
+    };
+
+    db.reservations.push(reservation);
+    const activity = recordActivity(
+      'reservation:created',
+      member.name,
+      req.session!.role,
+      `Masuk antrean reservasi: ${book.title}`,
+      `Kode ${reservation.reservationCode}`
+    );
+    const sync = emitFullSync('reservation:created', activity);
+    res.status(201).json({ reservation, sync });
+  });
+
+  app.delete('/api/reservations/:id', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const reservation = db.reservations.find((r) => r.id === req.params.id);
+    if (!reservation) {
+      res.status(404).json({ error: 'Reservasi tidak ditemukan.' });
+      return;
+    }
+    if (req.session!.role !== 'admin' && reservation.memberId !== req.session!.userId) {
+      res.status(403).json({ error: 'Tidak memiliki izin membatalkan reservasi ini.' });
+      return;
+    }
+    if (reservation.status === 'fulfilled' || reservation.status === 'cancelled') {
+      res.status(400).json({ error: 'Reservasi sudah selesai atau dibatalkan.' });
+      return;
+    }
+
+    reservation.status = 'cancelled';
+    const activity = recordActivity(
+      'reservation:cancelled',
+      req.session!.name,
+      req.session!.role,
+      `Membatalkan reservasi: ${reservation.bookTitle}`,
+      reservation.reservationCode
+    );
+    const sync = emitFullSync('reservation:cancelled', activity);
+    res.json({ reservation, sync });
+  });
+
+  // Loans (Borrow / Return / Extend / Settle Fine)
   app.post('/api/loans', requireAuth, (req: AuthenticatedRequest, res: Response) => {
     const { bookId, memberId, durationDays } = req.body as {
       bookId?: string;
@@ -1156,7 +1747,7 @@ export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) 
       return;
     }
     if (member.status !== 'active') {
-      res.status(403).json({ error: 'Status keanggotaan tidak aktif.' });
+      res.status(403).json({ error: 'Status keanggotaan ditangguhkan.' });
       return;
     }
 
@@ -1168,7 +1759,7 @@ export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) 
 
     reconcileLoansAndBooks(db);
     if (book.availableCopies <= 0) {
-      res.status(400).json({ error: 'Stok buku ini sedang habis dipinjam.' });
+      res.status(400).json({ error: 'Stok buku ini sedang habis dipinjam. Gunakan antrean reservasi.' });
       return;
     }
 
@@ -1208,8 +1799,20 @@ export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) 
       returnedAt: null,
       extendedCount: 0,
       fineAmount: 0,
+      finePaid: false,
       status: 'active',
     };
+
+    // Fulfill any ready/waiting reservation for this member & book
+    const matchingReservation = db.reservations.find(
+      (r) =>
+        r.bookId === book.id &&
+        r.memberId === member.id &&
+        (r.status === 'ready' || r.status === 'waiting')
+    );
+    if (matchingReservation) {
+      matchingReservation.status = 'fulfilled';
+    }
 
     book.borrowCount += 1;
     db.loans.unshift(newLoan);
@@ -1259,6 +1862,23 @@ export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) 
       `Pengembalian buku: ${loan.bookTitle}`,
       `Kode ${loan.loanCode} · ${fineText}`
     );
+
+    // Promote first waiting reservation in queue automatically
+    const nextWaiting = db.reservations.find(
+      (r) => r.bookId === loan.bookId && r.status === 'waiting'
+    );
+    if (nextWaiting) {
+      nextWaiting.status = 'ready';
+      nextWaiting.readyAt = now.toISOString();
+      recordActivity(
+        'reservation:ready',
+        'Sistem Antrean',
+        'system',
+        `Buku tersedia untuk antrean: ${nextWaiting.bookTitle}`,
+        `${nextWaiting.memberName} (${nextWaiting.reservationCode}) dapat meminjam sekarang`
+      );
+    }
+
     const sync = emitFullSync('loan:returned', activity);
     res.json({ loan, sync });
   });
@@ -1302,6 +1922,28 @@ export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) 
       `Kode ${loan.loanCode}`
     );
     const sync = emitFullSync('loan:extended', activity);
+    res.json({ loan, sync });
+  });
+
+  app.post('/api/loans/:id/pay-fine', requireAuth, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
+    const loan = db.loans.find((l) => l.id === req.params.id);
+    if (!loan) {
+      res.status(404).json({ error: 'Transaksi tidak ditemukan.' });
+      return;
+    }
+    if (loan.fineAmount <= 0 || loan.finePaid) {
+      res.status(400).json({ error: 'Tidak ada denda belum lunas pada transaksi ini.' });
+      return;
+    }
+    loan.finePaid = true;
+    const activity = recordActivity(
+      'fine:paid',
+      req.session!.name,
+      'admin',
+      `Pelunasan denda (${loan.memberName}): Rp ${loan.fineAmount.toLocaleString('id-ID')}`,
+      `Kode ${loan.loanCode} · ${loan.bookTitle}`
+    );
+    const sync = emitFullSync('fine:paid', activity);
     res.json({ loan, sync });
   });
 

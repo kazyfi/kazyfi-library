@@ -21,7 +21,11 @@ export interface Book {
   availableCopies: number;
   coverUrl: string;
   synopsis: string;
+  sampleExcerpt?: string;
+  barcodeCode?: string;
   borrowCount: number;
+  ratingAvg?: number;
+  ratingCount?: number;
   createdAt: string;
 }
 
@@ -32,6 +36,7 @@ export interface Member {
   email: string;
   department: string;
   status: 'active' | 'suspended';
+  bookmarkIds?: string[];
   joinedAt: string;
 }
 
@@ -52,18 +57,52 @@ export interface Loan {
   returnedAt: string | null;
   extendedCount: number;
   fineAmount: number;
+  finePaid?: boolean;
   status: LoanStatus;
   notes?: string;
+}
+
+export type ReservationStatus = 'waiting' | 'ready' | 'fulfilled' | 'cancelled';
+
+export interface Reservation {
+  id: string;
+  reservationCode: string;
+  bookId: string;
+  bookTitle: string;
+  memberId: string;
+  memberName: string;
+  memberCode: string;
+  status: ReservationStatus;
+  createdAt: string;
+  readyAt: string | null;
+}
+
+export interface BookReview {
+  id: string;
+  bookId: string;
+  memberId: string;
+  memberName: string;
+  rating: number;
+  comment: string;
+  createdAt: string;
 }
 
 export type ActivityType =
   | 'loan:created'
   | 'loan:returned'
   | 'loan:extended'
+  | 'fine:paid'
   | 'book:created'
   | 'book:updated'
   | 'book:deleted'
   | 'member:created'
+  | 'member:updated'
+  | 'member:deleted'
+  | 'member:status'
+  | 'reservation:created'
+  | 'reservation:ready'
+  | 'reservation:cancelled'
+  | 'review:created'
   | 'report:generated';
 
 export interface ActivityEvent {
@@ -146,6 +185,7 @@ export interface LibraryStatistics {
   overdueLoansCount: number;
   returnedLoansCount: number;
   activeMembersCount: number;
+  waitingReservationsCount: number;
   utilizationRate: number;
   onTimeReturnRate: number;
   totalOutstandingFines: number;
@@ -171,10 +211,19 @@ export interface SessionInfo {
   code: string;
 }
 
+export interface AccessibilityPrefs {
+  theme: 'light' | 'dark';
+  fontScale: 'normal' | 'lg' | 'xl';
+  highContrast: boolean;
+  dyslexiaSpacing: boolean;
+}
+
 export interface LibraryBootstrapPayload {
   books: Book[];
   members: Member[];
   loans: Loan[];
+  reservations: Reservation[];
+  reviews: BookReview[];
   activities: ActivityEvent[];
   reports: AutomatedReport[];
   reportSchedule: ReportSchedule;
