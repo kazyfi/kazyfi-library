@@ -165,7 +165,10 @@ export default function App() {
   }, [applySyncPayload, pushToast]);
 
   const apiCall = useCallback(
-    async <T,>(url: string, options: RequestInit = {}): Promise<T> => {
+    async <T extends { sync?: LibraryBootstrapPayload }>(
+      url: string,
+      options: RequestInit = {}
+    ): Promise<T> => {
       if (!session?.token) {
         throw new Error('Sesi belum aktif.');
       }
@@ -181,9 +184,12 @@ export default function App() {
       if (!res.ok) {
         throw new Error(data.error || 'Terjadi kesalahan pada server.');
       }
+      if (data.sync) {
+        applySyncPayload(data.sync as LibraryBootstrapPayload);
+      }
       return data as T;
     },
-    [session]
+    [session, applySyncPayload]
   );
 
   // Action handlers
