@@ -3,24 +3,25 @@ import fs from 'node:fs';
 import path from 'node:path';
 import dotenv from 'dotenv';
 import express, { type NextFunction, type Request, type Response } from 'express';
-import type {
-  ActivityEvent,
-  AutomatedReport,
-  Book,
-  BookCategory,
-  BookReview,
-  CategoryDistributionPoint,
-  DailyCirculationPoint,
-  FinePaymentMethod,
-  FinePaymentProof,
-  LibraryStatistics,
-  Loan,
-  Member,
-  ReportFrequency,
-  ReportKind,
-  ReportSchedule,
-  Reservation,
-  UserRole,
+import {
+  BOOK_CATEGORIES,
+  type ActivityEvent,
+  type AutomatedReport,
+  type Book,
+  type BookCategory,
+  type BookReview,
+  type CategoryDistributionPoint,
+  type DailyCirculationPoint,
+  type FinePaymentMethod,
+  type FinePaymentProof,
+  type LibraryStatistics,
+  type Loan,
+  type Member,
+  type ReportFrequency,
+  type ReportKind,
+  type ReportSchedule,
+  type Reservation,
+  type UserRole,
 } from '../src/types/library.ts';
 
 dotenv.config();
@@ -41,6 +42,12 @@ interface AdminCredential {
   updatedAt: string;
 }
 
+interface MemberCredential {
+  passwordHash: string;
+  salt: string;
+  updatedAt: string;
+}
+
 interface DatabaseState {
   books: Book[];
   members: Member[];
@@ -51,6 +58,7 @@ interface DatabaseState {
   reports: AutomatedReport[];
   reportSchedule: ReportSchedule;
   adminCredential?: AdminCredential | null;
+  memberCredentials?: Record<string, MemberCredential>;
 }
 
 interface SessionPayload {
@@ -66,14 +74,47 @@ interface AuthenticatedRequest extends Request {
   session?: SessionPayload;
 }
 
-const VALID_CATEGORIES: BookCategory[] = [
-  'Filsafat & Sejarah',
-  'Arsitektur & Desain',
-  'Teknologi & Data',
-  'Sastra & Fiksi',
-  'Ekonomi & Bisnis',
-  'Sains & Astronomi',
-];
+const VALID_CATEGORIES: BookCategory[] = [...BOOK_CATEGORIES];
+
+const DEFAULT_COVER_BY_CATEGORY: Record<BookCategory, string> = {
+  'Filsafat & Sejarah': '/src/assets/images/cover_filsafat_nusantara_1795659500953.jpg',
+  'Arsitektur & Desain': '/src/assets/images/cover_arsitektur_tropis_1795659501240.jpg',
+  'Teknologi & Data': '/src/assets/images/cover_algoritma_data_1795659501461.jpg',
+  'Sastra & Fiksi': '/src/assets/images/cover_sastra_senja_1795659501618.jpg',
+  'Ekonomi & Bisnis': '/src/assets/images/cover_ekonomi_hijau_1795659501820.jpg',
+  'Sains & Astronomi': '/src/assets/images/cover_astronomi_kosmos_1795659502173.jpg',
+  'Pendidikan & Pedagogi': '/src/assets/images/cover_filsafat_nusantara_1795659500953.jpg',
+  'Hukum & Politik': '/src/assets/images/cover_ekonomi_hijau_1795659501820.jpg',
+  'Psikologi & Pengembangan Diri': '/src/assets/images/cover_sastra_senja_1795659501618.jpg',
+  'Kesehatan & Kedokteran': '/src/assets/images/cover_astronomi_kosmos_1795659502173.jpg',
+  'Agama & Spiritualitas': '/src/assets/images/cover_filsafat_nusantara_1795659500953.jpg',
+  'Seni, Musik & Budaya': '/src/assets/images/cover_arsitektur_tropis_1795659501240.jpg',
+  'Bahasa & Linguistik': '/src/assets/images/cover_sastra_senja_1795659501618.jpg',
+  'Ensiklopedia & Referensi': '/src/assets/images/cover_algoritma_data_1795659501461.jpg',
+};
+
+function sanitizeBookCoverUrl(rawCover: unknown): string | null {
+  if (typeof rawCover !== 'string') return null;
+  const trimmed = rawCover.trim();
+  if (!trimmed) return null;
+  if (/^data:image\/(png|jpeg|jpg|webp);base64,[A-Za-z0-9+/=]+$/.test(trimmed)) {
+    return trimmed.length <= 650_000 ? trimmed : null;
+  }
+  if (/^\/(?:src\/)?assets\/images\/[A-Za-z0-9_.-]+\.(?:jpg|jpeg|png|webp)$/.test(trimmed)) {
+    return trimmed;
+  }
+  if (trimmed.length <= 500) {
+    try {
+      const parsed = new URL(trimmed);
+      if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+        return parsed.toString();
+      }
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
 
 const DEFAULT_EXCERPTS: Record<string, string> = {
   'bk-001':
@@ -833,6 +874,7 @@ function createInitialSeedState(): DatabaseState {
     reports: [],
     reportSchedule,
     adminCredential: null,
+    memberCredentials: {},
   };
 
   reconcileLoansAndBooks(initialState);
@@ -853,6 +895,20 @@ function normalizeLoadedState(rawState: Partial<DatabaseState>): DatabaseState {
     typeof rawAdmin.salt === 'string'
       ? rawAdmin
       : null;
+
+  const memberCredentials: Record<string, MemberCredential> = {};
+  if (rawState.memberCredentials && typeof rawState.memberCredentials === 'object') {
+    for (const [id, cred] of Object.entries(rawState.memberCredentials)) {
+      if (
+        cred &&
+        typeof cred.passwordHash === 'string' &&
+        typeof cred.salt === 'string'
+      ) {
+        memberCredentials[id] = cred;
+      }
+    }
+  }
+
   const state: DatabaseState = {
     books: Array.isArray(rawState.books) ? rawState.books : seed.books,
     members: Array.isArray(rawState.members)
@@ -877,6 +933,7 @@ function normalizeLoadedState(rawState: Partial<DatabaseState>): DatabaseState {
     reports: Array.isArray(rawState.reports) ? rawState.reports : seed.reports,
     reportSchedule: rawState.reportSchedule ?? seed.reportSchedule,
     adminCredential,
+    memberCredentials,
   };
   reconcileLoansAndBooks(state);
   return state;
@@ -1215,42 +1272,209 @@ export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) 
     res.json(issueAdminSessionResponse(displayUsername));
   });
 
-  app.post('/api/auth/session', (req: Request, res: Response) => {
-    const { role, memberId } = req.body as { role?: UserRole; memberId?: string };
-
-    if (role === 'admin') {
-      res.status(403).json({
-        error: 'Akses admin memerlukan autentikasi melalui menu Login Admin.',
-      });
-      return;
-    }
-
-    const targetMember =
-      db.members.find((m) => m.id === memberId) ??
-      db.members.find((m) => m.status === 'active') ??
-      db.members[0];
-
-    if (!targetMember) {
-      res.status(404).json({ error: 'Anggota tidak ditemukan.' });
-      return;
-    }
-
+  function issueMemberSessionResponse(member: Member) {
     const payload: SessionPayload = {
       role: 'member',
-      userId: targetMember.id,
-      name: targetMember.name,
-      email: targetMember.email,
-      code: targetMember.memberCode,
+      userId: member.id,
+      name: member.name,
+      email: member.email,
+      code: member.memberCode,
       exp: Date.now() + 1000 * 60 * 60 * 12,
     };
     const token = signSessionToken(payload);
-    res.json({
+    return {
       token,
       role: payload.role,
       userId: payload.userId,
       name: payload.name,
       email: payload.email,
       code: payload.code,
+    };
+  }
+
+  function generateNextMemberCode(): string {
+    let maxNum = db.members.length;
+    for (const m of db.members) {
+      const match = m.memberCode.match(/(\d+)$/);
+      if (match) {
+        const parsed = Number(match[1]);
+        if (Number.isFinite(parsed) && parsed > maxNum) maxNum = parsed;
+      }
+    }
+    return `AGT-2026-${String(maxNum + 1).padStart(3, '0')}`;
+  }
+
+  app.post('/api/auth/member-register', (req: Request, res: Response) => {
+    const name = sanitizeText(req.body?.name, 80);
+    const email = sanitizeText(req.body?.email, 100).toLowerCase();
+    const department = sanitizeText(req.body?.department, 80) || 'Umum';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+
+    if (name.length < 2) {
+      res.status(400).json({ error: 'Nama lengkap minimal 2 karakter.' });
+      return;
+    }
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      res.status(400).json({ error: 'Format alamat email tidak valid.' });
+      return;
+    }
+    if (password.length < 6 || password.length > 128) {
+      res.status(400).json({ error: 'Kata sandi harus terdiri dari 6 hingga 128 karakter.' });
+      return;
+    }
+    if (db.members.some((m) => m.email.toLowerCase() === email)) {
+      res.status(409).json({
+        error: 'Email tersebut sudah terdaftar. Silakan masuk melalui menu Login Anggota.',
+      });
+      return;
+    }
+
+    const memberCode = generateNextMemberCode();
+    const newMember: Member = {
+      id: `mem-${crypto.randomUUID().slice(0, 8)}`,
+      memberCode,
+      name,
+      email,
+      department,
+      status: 'active',
+      bookmarkIds: [],
+      joinedAt: new Date().toISOString(),
+    };
+
+    const salt = crypto.randomBytes(16).toString('hex');
+    const passwordHash = hashAdminPassword(password, salt);
+
+    db.members.unshift(newMember);
+    if (!db.memberCredentials) db.memberCredentials = {};
+    db.memberCredentials[newMember.id] = {
+      passwordHash,
+      salt,
+      updatedAt: new Date().toISOString(),
+    };
+
+    const activity = recordActivity(
+      'member:created',
+      newMember.name,
+      'member',
+      `Pendaftaran anggota mandiri: ${newMember.name}`,
+      `${newMember.memberCode} · ${newMember.department}`
+    );
+    const sync = emitFullSync('member:registered', activity);
+    res.status(201).json({
+      session: issueMemberSessionResponse(newMember),
+      member: newMember,
+      sync,
+    });
+  });
+
+  app.post('/api/auth/member-login', (req: Request, res: Response) => {
+    const identifier = sanitizeText(req.body?.identifier, 120).toLowerCase();
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+
+    if (!identifier || !password) {
+      res.status(400).json({ error: 'Email atau kode anggota dan kata sandi wajib diisi.' });
+      return;
+    }
+
+    const member = db.members.find(
+      (m) =>
+        m.email.toLowerCase() === identifier ||
+        m.memberCode.toLowerCase() === identifier
+    );
+
+    if (!member) {
+      res.status(401).json({ error: 'Email/kode anggota atau kata sandi salah.' });
+      return;
+    }
+
+    const cred = db.memberCredentials?.[member.id];
+    if (!cred) {
+      res.status(409).json({
+        code: 'NEEDS_ACTIVATION',
+        email: member.email,
+        memberCode: member.memberCode,
+        error:
+          'Akun anggota ini belum memiliki kata sandi. Silakan lakukan Aktivasi Sandi terlebih dahulu menggunakan Email dan Kode Anggota Anda.',
+      });
+      return;
+    }
+
+    const computedBuf = crypto.scryptSync(password, cred.salt, 64);
+    const storedBuf = Buffer.from(cred.passwordHash, 'hex');
+    const valid =
+      computedBuf.length === storedBuf.length && crypto.timingSafeEqual(computedBuf, storedBuf);
+
+    if (!valid) {
+      res.status(401).json({ error: 'Email/kode anggota atau kata sandi salah.' });
+      return;
+    }
+
+    if (member.status === 'suspended') {
+      res.status(403).json({
+        error: 'Status keanggotaan Anda sedang ditangguhkan. Silakan hubungi pustakawan admin.',
+      });
+      return;
+    }
+
+    res.json({ session: issueMemberSessionResponse(member) });
+  });
+
+  app.post('/api/auth/member-activate', (req: Request, res: Response) => {
+    const email = sanitizeText(req.body?.email, 100).toLowerCase();
+    const memberCode = sanitizeText(req.body?.memberCode, 32).toUpperCase();
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+
+    if (!email || !memberCode) {
+      res.status(400).json({ error: 'Email dan kode anggota (contoh: AGT-2026-001) wajib diisi.' });
+      return;
+    }
+    if (password.length < 6 || password.length > 128) {
+      res.status(400).json({ error: 'Kata sandi baru minimal 6 karakter.' });
+      return;
+    }
+
+    const member = db.members.find(
+      (m) =>
+        m.email.toLowerCase() === email &&
+        m.memberCode.toUpperCase() === memberCode
+    );
+    if (!member) {
+      res.status(404).json({
+        error: 'Kombinasi email dan kode anggota tidak cocok dengan data keanggotaan.',
+      });
+      return;
+    }
+
+    if (db.memberCredentials?.[member.id]) {
+      res.status(409).json({
+        error: 'Akun anggota ini sudah aktif memiliki kata sandi. Silakan masuk melalui Login Anggota.',
+      });
+      return;
+    }
+
+    if (member.status === 'suspended') {
+      res.status(403).json({
+        error: 'Status keanggotaan Anda sedang ditangguhkan. Hubungi pustakawan admin.',
+      });
+      return;
+    }
+
+    const salt = crypto.randomBytes(16).toString('hex');
+    const passwordHash = hashAdminPassword(password, salt);
+    if (!db.memberCredentials) db.memberCredentials = {};
+    db.memberCredentials[member.id] = {
+      passwordHash,
+      salt,
+      updatedAt: new Date().toISOString(),
+    };
+    saveDatabase(db);
+
+    res.json({ session: issueMemberSessionResponse(member) });
+  });
+
+  app.post('/api/auth/session', (_req: Request, res: Response) => {
+    res.status(403).json({
+      error: 'Autentikasi wajib melalui menu Login Anggota, Daftar Anggota, atau Login Admin.',
     });
   });
 
@@ -1298,14 +1522,17 @@ export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) 
       return;
     }
 
-    const coverByCategory: Record<BookCategory, string> = {
-      'Filsafat & Sejarah': '/src/assets/images/cover_filsafat_nusantara_1795659500953.jpg',
-      'Arsitektur & Desain': '/src/assets/images/cover_arsitektur_tropis_1795659501240.jpg',
-      'Teknologi & Data': '/src/assets/images/cover_algoritma_data_1795659501461.jpg',
-      'Sastra & Fiksi': '/src/assets/images/cover_sastra_senja_1795659501618.jpg',
-      'Ekonomi & Bisnis': '/src/assets/images/cover_ekonomi_hijau_1795659501820.jpg',
-      'Sains & Astronomi': '/src/assets/images/cover_astronomi_kosmos_1795659502173.jpg',
-    };
+    let resolvedCoverUrl = DEFAULT_COVER_BY_CATEGORY[category];
+    if (typeof req.body.coverUrl === 'string' && req.body.coverUrl.trim() !== '') {
+      const validCover = sanitizeBookCoverUrl(req.body.coverUrl);
+      if (!validCover) {
+        res.status(400).json({
+          error: 'Cover buku harus berupa gambar PNG/JPG/WEBP yang valid atau URL https:// yang sah.',
+        });
+        return;
+      }
+      resolvedCoverUrl = validCover;
+    }
 
     const newBook: Book = {
       id: `bk-${crypto.randomUUID().slice(0, 8)}`,
@@ -1318,7 +1545,7 @@ export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) 
       shelfCode,
       totalCopies,
       availableCopies: totalCopies,
-      coverUrl: coverByCategory[category],
+      coverUrl: resolvedCoverUrl,
       synopsis,
       sampleExcerpt,
       barcodeCode,
@@ -1381,6 +1608,23 @@ export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) 
       return;
     }
 
+    let nextCoverUrl = book.coverUrl;
+    if (typeof req.body.coverUrl === 'string') {
+      const trimmedCover = req.body.coverUrl.trim();
+      if (!trimmedCover) {
+        nextCoverUrl = DEFAULT_COVER_BY_CATEGORY[category];
+      } else {
+        const validCover = sanitizeBookCoverUrl(trimmedCover);
+        if (!validCover) {
+          res.status(400).json({
+            error: 'Cover buku harus berupa gambar PNG/JPG/WEBP yang valid atau URL https:// yang sah.',
+          });
+          return;
+        }
+        nextCoverUrl = validCover;
+      }
+    }
+
     book.title = title;
     book.author = author;
     book.publisher = publisher;
@@ -1393,6 +1637,7 @@ export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) 
     }
     book.category = category;
     book.year = year;
+    book.coverUrl = nextCoverUrl;
     book.totalCopies = requestedCopies;
     book.availableCopies = requestedCopies - activeLoansCount;
 
@@ -1617,6 +1862,9 @@ export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) 
     }
 
     db.members.splice(idx, 1);
+    if (db.memberCredentials) {
+      delete db.memberCredentials[member.id];
+    }
     const activity = recordActivity(
       'member:deleted',
       req.session!.name,

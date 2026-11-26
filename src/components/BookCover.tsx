@@ -1,5 +1,5 @@
 import { BookOpen } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 interface BookCoverProps {
   src: string;
@@ -9,6 +9,10 @@ interface BookCoverProps {
 
 export function BookCover({ src, title, className = '' }: BookCoverProps) {
   const [hasError, setHasError] = useState(false);
+
+  useEffect(() => {
+    setHasError(false);
+  }, [src]);
 
   if (hasError || !src) {
     return (

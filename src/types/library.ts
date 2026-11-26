@@ -1,12 +1,23 @@
 export type UserRole = 'admin' | 'member';
 
-export type BookCategory =
-  | 'Filsafat & Sejarah'
-  | 'Arsitektur & Desain'
-  | 'Teknologi & Data'
-  | 'Sastra & Fiksi'
-  | 'Ekonomi & Bisnis'
-  | 'Sains & Astronomi';
+export const BOOK_CATEGORIES = [
+  'Filsafat & Sejarah',
+  'Arsitektur & Desain',
+  'Teknologi & Data',
+  'Sastra & Fiksi',
+  'Ekonomi & Bisnis',
+  'Sains & Astronomi',
+  'Pendidikan & Pedagogi',
+  'Hukum & Politik',
+  'Psikologi & Pengembangan Diri',
+  'Kesehatan & Kedokteran',
+  'Agama & Spiritualitas',
+  'Seni, Musik & Budaya',
+  'Bahasa & Linguistik',
+  'Ensiklopedia & Referensi',
+] as const;
+
+export type BookCategory = (typeof BOOK_CATEGORIES)[number];
 
 export interface Book {
   id: string;

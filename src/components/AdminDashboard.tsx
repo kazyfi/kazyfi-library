@@ -7,6 +7,7 @@ import {
   Clock,
   Download,
   FileSpreadsheet,
+  ImagePlus,
   Pencil,
   Plus,
   Printer,
@@ -22,18 +23,19 @@ import {
   X,
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import type {
-  ActivityEvent,
-  AutomatedReport,
-  Book,
-  BookCategory,
-  LibraryStatistics,
-  Loan,
-  Member,
-  ReportFrequency,
-  ReportKind,
-  ReportSchedule,
-  Reservation,
+import {
+  BOOK_CATEGORIES,
+  type ActivityEvent,
+  type AutomatedReport,
+  type Book,
+  type BookCategory,
+  type LibraryStatistics,
+  type Loan,
+  type Member,
+  type ReportFrequency,
+  type ReportKind,
+  type ReportSchedule,
+  type Reservation,
 } from '../types/library';
 import {
   formatDateId,
@@ -45,6 +47,7 @@ import {
 import { BookBarcodePlugin } from './BookBarcodePlugin';
 import { BookCover } from './BookCover';
 import { CirculationChart } from './CirculationChart';
+import { HoverPop } from './HoverPop';
 
 export type AdminTab =
   | 'overview'
@@ -67,7 +70,11 @@ interface AdminDashboardProps {
   sseConnected: boolean;
   connectedClients: number;
   authToken: string;
-  onCreateBook: (payload: Omit<Book, 'id' | 'availableCopies' | 'coverUrl' | 'borrowCount' | 'createdAt'>) => Promise<void>;
+  onCreateBook: (
+    payload: Omit<Book, 'id' | 'availableCopies' | 'coverUrl' | 'borrowCount' | 'createdAt'> & {
+      coverUrl?: string;
+    }
+  ) => Promise<void>;
   onUpdateBook: (id: string, payload: Partial<Book>) => Promise<void>;
   onDeleteBook: (id: string) => Promise<void>;
   onCreateLoan: (payload: { bookId: string; memberId: string; durationDays: 7 | 14 }) => Promise<void>;
@@ -99,14 +106,83 @@ interface AdminDashboardProps {
   onNavigateTab: (tab: AdminTab) => void;
 }
 
-const CATEGORIES: BookCategory[] = [
-  'Filsafat & Sejarah',
-  'Arsitektur & Desain',
-  'Teknologi & Data',
-  'Sastra & Fiksi',
-  'Ekonomi & Bisnis',
-  'Sains & Astronomi',
-];
+const CATEGORIES: BookCategory[] = [...BOOK_CATEGORIES];
+
+const COVER_PRESETS = [
+  {
+    label: 'Filsafat & Sejarah',
+    url: '/src/assets/images/cover_filsafat_nusantara_1795659500953.jpg',
+  },
+  {
+    label: 'Arsitektur & Seni',
+    url: '/src/assets/images/cover_arsitektur_tropis_1795659501240.jpg',
+  },
+  {
+    label: 'Teknologi & Referensi',
+    url: '/src/assets/images/cover_algoritma_data_1795659501461.jpg',
+  },
+  {
+    label: 'Sastra & Bahasa',
+    url: '/src/assets/images/cover_sastra_senja_1795659501618.jpg',
+  },
+  {
+    label: 'Ekonomi & Hukum',
+    url: '/src/assets/images/cover_ekonomi_hijau_1795659501820.jpg',
+  },
+  {
+    label: 'Sains & Kesehatan',
+    url: '/src/assets/images/cover_astronomi_kosmos_1795659502173.jpg',
+  },
+] as const;
+
+function isSafeBookCoverInput(url: string): boolean {
+  const trimmed = url.trim();
+  if (!trimmed) return true;
+  if (/^data:image\/(png|jpeg|jpg|webp);base64,[A-Za-z0-9+/=]+$/.test(trimmed)) {
+    return trimmed.length <= 650_000;
+  }
+  if (/^\/(?:src\/)?assets\/images\/[A-Za-z0-9_.-]+\.(?:jpg|jpeg|png|webp)$/.test(trimmed)) {
+    return true;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
+async function compressCoverFileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Gagal membaca file gambar cover.'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('Format gambar cover tidak valid.'));
+      img.onload = () => {
+        const maxWidth = 560;
+        const scale = img.width > maxWidth ? maxWidth / img.width : 1;
+        const targetW = Math.max(1, Math.round(img.width * scale));
+        const targetH = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          reject(new Error('Canvas browser tidak tersedia.'));
+          return;
+        }
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, targetW, targetH);
+        ctx.drawImage(img, 0, 0, targetW, targetH);
+        const compressed = canvas.toDataURL('image/jpeg', 0.85);
+        resolve(compressed.length > 620_000 ? canvas.toDataURL('image/jpeg', 0.68) : compressed);
+      };
+      img.src = String(reader.result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
 
 export function AdminDashboard({
   activeTab,
@@ -152,10 +228,18 @@ export function AdminDashboard({
     category: 'Teknologi & Data' as BookCategory,
     shelfCode: 'RAK-C1',
     totalCopies: 3,
+    coverUrl: '',
     synopsis: '',
     sampleExcerpt: '',
   });
+  const [bookFormError, setBookFormError] = useState<string | null>(null);
   const [bookSubmitting, setBookSubmitting] = useState(false);
+
+  const [coverModalOpen, setCoverModalOpen] = useState(false);
+  const [coverBookId, setCoverBookId] = useState<string>(books[0]?.id ?? '');
+  const [coverDraftUrl, setCoverDraftUrl] = useState('');
+  const [coverError, setCoverError] = useState<string | null>(null);
+  const [coverSaving, setCoverSaving] = useState(false);
 
   const [loanFilter, setLoanFilter] = useState<'all' | 'active' | 'overdue' | 'returned'>('all');
   const [loanSearch, setLoanSearch] = useState('');
@@ -267,6 +351,7 @@ export function AdminDashboard({
 
   function openAddBookModal() {
     setEditingBook(null);
+    setBookFormError(null);
     setBookForm({
       title: '',
       author: '',
@@ -276,6 +361,7 @@ export function AdminDashboard({
       category: 'Teknologi & Data',
       shelfCode: 'RAK-C1',
       totalCopies: 3,
+      coverUrl: '',
       synopsis: '',
       sampleExcerpt: '',
     });
@@ -284,6 +370,7 @@ export function AdminDashboard({
 
   function openEditBookModal(book: Book) {
     setEditingBook(book);
+    setBookFormError(null);
     setBookForm({
       title: book.title,
       author: book.author,
@@ -293,20 +380,101 @@ export function AdminDashboard({
       category: book.category,
       shelfCode: book.shelfCode,
       totalCopies: book.totalCopies,
+      coverUrl: book.coverUrl,
       synopsis: book.synopsis,
       sampleExcerpt: book.sampleExcerpt ?? '',
     });
     setBookModalOpen(true);
   }
 
+  async function handleBookFormCoverUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setBookFormError(null);
+    if (!['image/png', 'image/jpeg', 'image/jpg', 'image/webp'].includes(file.type)) {
+      setBookFormError('Harap pilih gambar berformat PNG, JPG, atau WEBP.');
+      return;
+    }
+    try {
+      const compressed = await compressCoverFileToDataUrl(file);
+      setBookForm((prev) => ({ ...prev, coverUrl: compressed }));
+    } catch (err) {
+      setBookFormError(err instanceof Error ? err.message : 'Gagal memproses gambar cover.');
+    }
+  }
+
+  function openCoverMenuModal(targetBook?: Book) {
+    const chosen = targetBook ?? books[0] ?? null;
+    if (!chosen) return;
+    setCoverBookId(chosen.id);
+    setCoverDraftUrl(chosen.coverUrl);
+    setCoverError(null);
+    setCoverModalOpen(true);
+  }
+
+  function handleCoverBookChange(nextBookId: string) {
+    setCoverBookId(nextBookId);
+    const chosen = books.find((b) => b.id === nextBookId);
+    setCoverDraftUrl(chosen?.coverUrl ?? '');
+    setCoverError(null);
+  }
+
+  async function handleCoverModalFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setCoverError(null);
+    if (!['image/png', 'image/jpeg', 'image/jpg', 'image/webp'].includes(file.type)) {
+      setCoverError('Harap pilih gambar berformat PNG, JPG, atau WEBP.');
+      return;
+    }
+    try {
+      const compressed = await compressCoverFileToDataUrl(file);
+      setCoverDraftUrl(compressed);
+    } catch (err) {
+      setCoverError(err instanceof Error ? err.message : 'Gagal memproses gambar cover.');
+    }
+  }
+
+  async function handleSaveCoverMenu(e: React.FormEvent) {
+    e.preventDefault();
+    if (!coverBookId) return;
+    const trimmed = coverDraftUrl.trim();
+    if (!isSafeBookCoverInput(trimmed)) {
+      setCoverError('URL atau format gambar cover tidak valid. Gunakan PNG/JPG/WEBP atau URL https://.');
+      return;
+    }
+    setCoverSaving(true);
+    setCoverError(null);
+    try {
+      await onUpdateBook(coverBookId, { coverUrl: trimmed });
+      setCoverModalOpen(false);
+    } catch (err) {
+      setCoverError(err instanceof Error ? err.message : 'Gagal menyimpan cover buku.');
+    } finally {
+      setCoverSaving(false);
+    }
+  }
+
   async function handleSaveBook(e: React.FormEvent) {
     e.preventDefault();
+    if (!isSafeBookCoverInput(bookForm.coverUrl)) {
+      setBookFormError('URL atau format gambar cover tidak valid. Gunakan PNG/JPG/WEBP atau URL https://.');
+      return;
+    }
     setBookSubmitting(true);
+    setBookFormError(null);
     try {
+      const payload = {
+        ...bookForm,
+        coverUrl: bookForm.coverUrl.trim(),
+      };
       if (editingBook) {
-        await onUpdateBook(editingBook.id, bookForm);
+        await onUpdateBook(editingBook.id, payload);
       } else {
-        await onCreateBook(bookForm);
+        await onCreateBook({
+          ...payload,
+          coverUrl: payload.coverUrl || undefined,
+        });
       }
       setBookModalOpen(false);
     } finally {
@@ -822,59 +990,125 @@ export function AdminDashboard({
 
         {/* 4-Column KPI Strip */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="bg-white dark:bg-[#111723] border border-slate-200/90 dark:border-slate-800 rounded-xl p-5">
-            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
-              Total Koleksi Pustaka
-            </p>
-            <p className="text-3xl font-bold font-mono tabular-nums text-slate-900 dark:text-slate-100 mt-2">
-              {stats.totalTitles}
-            </p>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-2 font-mono tabular-nums">
-              {stats.availableCopies} dari {stats.totalCopies} eksemplar tersedia
-            </p>
-          </div>
+          <HoverPop
+            className="h-full"
+            placement="top"
+            widthClass="w-64"
+            content={
+              <div className="space-y-1">
+                <div className="text-xs font-bold text-[#1A2B5E] dark:text-indigo-300">
+                  Ringkasan Inventaris Koleksi
+                </div>
+                <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
+                  Tersedia {stats.availableCopies} salinan siap pinjam dari total {stats.totalCopies} eksemplar across {CATEGORIES.length} kategori.
+                </p>
+              </div>
+            }
+          >
+            <div className="h-full bg-white dark:bg-[#111723] border border-slate-200/90 dark:border-slate-800 hover:border-[#1A2B5E] dark:hover:border-indigo-500 rounded-xl p-5 hover-pop cursor-default">
+              <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                Total Koleksi Pustaka
+              </p>
+              <p className="text-3xl font-bold font-mono tabular-nums text-slate-900 dark:text-slate-100 mt-2">
+                {stats.totalTitles}
+              </p>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-2 font-mono tabular-nums">
+                {stats.availableCopies} dari {stats.totalCopies} eksemplar tersedia
+              </p>
+            </div>
+          </HoverPop>
 
-          <div className="bg-white dark:bg-[#111723] border border-slate-200/90 dark:border-slate-800 rounded-xl p-5">
-            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
-              Peminjaman & Antrean Aktif
-            </p>
-            <p className="text-3xl font-bold font-mono tabular-nums text-[#1A2B5E] dark:text-indigo-400 mt-2">
-              {stats.activeLoansCount}
-            </p>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-2 font-mono tabular-nums">
-              Utilisasi {stats.utilizationRate}% · {stats.waitingReservationsCount} antrean reservasi
-            </p>
-          </div>
+          <HoverPop
+            className="h-full"
+            placement="top"
+            widthClass="w-64"
+            content={
+              <div className="space-y-1">
+                <div className="text-xs font-bold text-[#1A2B5E] dark:text-indigo-300">
+                  Sirkulasi & Antrean Berjalan
+                </div>
+                <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
+                  Tingkat pemanfaatan koleksi {stats.utilizationRate}% dengan {stats.waitingReservationsCount} reservasi menunggu giliran.
+                </p>
+              </div>
+            }
+          >
+            <div className="h-full bg-white dark:bg-[#111723] border border-slate-200/90 dark:border-slate-800 hover:border-[#1A2B5E] dark:hover:border-indigo-500 rounded-xl p-5 hover-pop cursor-default">
+              <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                Peminjaman & Antrean Aktif
+              </p>
+              <p className="text-3xl font-bold font-mono tabular-nums text-[#1A2B5E] dark:text-indigo-400 mt-2">
+                {stats.activeLoansCount}
+              </p>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-2 font-mono tabular-nums">
+                Utilisasi {stats.utilizationRate}% · {stats.waitingReservationsCount} antrean reservasi
+              </p>
+            </div>
+          </HoverPop>
 
-          <div className="bg-white dark:bg-[#111723] border border-slate-200/90 dark:border-slate-800 rounded-xl p-5">
-            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
-              Keterlambatan & Denda
-            </p>
-            <p
-              className={`text-3xl font-bold font-mono tabular-nums mt-2 ${
-                stats.overdueLoansCount > 0
-                  ? 'text-red-600 dark:text-red-400'
-                  : 'text-emerald-600 dark:text-emerald-400'
-              }`}
-            >
-              {stats.overdueLoansCount}
-            </p>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-2 font-mono tabular-nums">
-              Denda belum lunas {formatRupiah(stats.totalOutstandingFines)}
-            </p>
-          </div>
+          <HoverPop
+            className="h-full"
+            placement="top"
+            widthClass="w-64"
+            content={
+              <div className="space-y-1">
+                <div className="text-xs font-bold text-[#1A2B5E] dark:text-indigo-300">
+                  Pemantauan Denda Keterlambatan
+                </div>
+                <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
+                  {pendingFineProofLoans.length > 0
+                    ? `${pendingFineProofLoans.length} bukti transfer/QRIS menunggu verifikasi Admin.`
+                    : `Tarif keterlambatan Rp 2.000/hari. Total tagihan aktif ${formatRupiah(stats.totalOutstandingFines)}.`}
+                </p>
+              </div>
+            }
+          >
+            <div className="h-full bg-white dark:bg-[#111723] border border-slate-200/90 dark:border-slate-800 hover:border-[#1A2B5E] dark:hover:border-indigo-500 rounded-xl p-5 hover-pop cursor-default">
+              <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                Keterlambatan & Denda
+              </p>
+              <p
+                className={`text-3xl font-bold font-mono tabular-nums mt-2 ${
+                  stats.overdueLoansCount > 0
+                    ? 'text-red-600 dark:text-red-400'
+                    : 'text-emerald-600 dark:text-emerald-400'
+                }`}
+              >
+                {stats.overdueLoansCount}
+              </p>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-2 font-mono tabular-nums">
+                Denda belum lunas {formatRupiah(stats.totalOutstandingFines)}
+              </p>
+            </div>
+          </HoverPop>
 
-          <div className="bg-white dark:bg-[#111723] border border-slate-200/90 dark:border-slate-800 rounded-xl p-5">
-            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
-              Ketepatan Pengembalian
-            </p>
-            <p className="text-3xl font-bold font-mono tabular-nums text-emerald-700 dark:text-emerald-400 mt-2">
-              {stats.onTimeReturnRate}%
-            </p>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-2 font-mono tabular-nums">
-              {stats.returnedLoansCount} selesai · {stats.activeMembersCount} anggota aktif
-            </p>
-          </div>
+          <HoverPop
+            className="h-full"
+            placement="top"
+            widthClass="w-64"
+            content={
+              <div className="space-y-1">
+                <div className="text-xs font-bold text-[#1A2B5E] dark:text-indigo-300">
+                  Kepatuhan Pengembalian Anggota
+                </div>
+                <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
+                  {stats.onTimeReturnRate}% transaksi dikembalikan sebelum jatuh tempo oleh {stats.activeMembersCount} anggota aktif.
+                </p>
+              </div>
+            }
+          >
+            <div className="h-full bg-white dark:bg-[#111723] border border-slate-200/90 dark:border-slate-800 hover:border-[#1A2B5E] dark:hover:border-indigo-500 rounded-xl p-5 hover-pop cursor-default">
+              <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+                Ketepatan Pengembalian
+              </p>
+              <p className="text-3xl font-bold font-mono tabular-nums text-emerald-700 dark:text-emerald-400 mt-2">
+                {stats.onTimeReturnRate}%
+              </p>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-2 font-mono tabular-nums">
+                {stats.returnedLoansCount} selesai · {stats.activeMembersCount} anggota aktif
+              </p>
+            </div>
+          </HoverPop>
         </div>
 
         {/* 2-Column Split: Circulation Chart + Real-Time Activity Stream */}
@@ -1044,6 +1278,15 @@ export function AdminDashboard({
           <div className="flex flex-wrap items-center gap-2.5">
             <button
               type="button"
+              onClick={() => openCoverMenuModal()}
+              disabled={books.length === 0}
+              className="inline-flex items-center gap-2 px-3.5 py-2 text-sm font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-[#111723] border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+            >
+              <ImagePlus className="w-4 h-4 text-[#1A2B5E] dark:text-indigo-400" />
+              <span>Tambah Cover Buku</span>
+            </button>
+            <button
+              type="button"
               onClick={() => {
                 setBarcodeTargetBookId(books[0]?.id ?? null);
                 onNavigateTab('barcodes');
@@ -1083,7 +1326,7 @@ export function AdminDashboard({
               onChange={(e) => setBookCategoryFilter(e.target.value)}
               className="px-3 py-2 text-sm bg-white dark:bg-[#111723] border border-slate-200/90 dark:border-slate-800 rounded-xl text-slate-700 dark:text-slate-200 focus:outline-none focus:border-[#1A2B5E] dark:focus:border-indigo-500"
             >
-              <option value="all">Semua Kategori</option>
+              <option value="all">Semua Kategori ({CATEGORIES.length})</option>
               {CATEGORIES.map((c) => (
                 <option key={c} value={c}>
                   {c}
@@ -1139,21 +1382,39 @@ export function AdminDashboard({
                     className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40 transition-colors"
                   >
                     <td className="py-3 px-4">
-                      <div className="flex items-center gap-3">
-                        <BookCover
-                          src={book.coverUrl}
-                          title={book.title}
-                          className="w-10 h-14 rounded-sm shrink-0 border border-slate-200 dark:border-slate-700"
-                        />
-                        <div className="min-w-0">
-                          <div className="font-semibold text-slate-900 dark:text-slate-100 truncate max-w-xs">
-                            {book.title}
+                      <HoverPop
+                        placement="right"
+                        widthClass="w-72"
+                        content={
+                          <div className="space-y-1.5">
+                            <div className="text-[10px] font-mono text-slate-500 dark:text-slate-400">
+                              {book.category} · {book.shelfCode}
+                            </div>
+                            <div className="text-xs font-bold text-slate-950 dark:text-slate-50">
+                              {book.title}
+                            </div>
+                            <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed line-clamp-3">
+                              {book.synopsis}
+                            </p>
                           </div>
-                          <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                            {book.author} · {book.publisher}, {book.year}
+                        }
+                      >
+                        <div className="flex items-center gap-3">
+                          <BookCover
+                            src={book.coverUrl}
+                            title={book.title}
+                            className="w-10 h-14 rounded-sm shrink-0 border border-slate-200 dark:border-slate-700"
+                          />
+                          <div className="min-w-0">
+                            <div className="font-semibold text-slate-900 dark:text-slate-100 truncate max-w-xs">
+                              {book.title}
+                            </div>
+                            <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                              {book.author} · {book.publisher}, {book.year}
+                            </div>
                           </div>
                         </div>
-                      </div>
+                      </HoverPop>
                     </td>
                     <td className="py-3 px-4 font-mono tabular-nums text-xs text-slate-600 dark:text-slate-300 whitespace-nowrap">
                       {book.isbn}
@@ -1195,33 +1456,86 @@ export function AdminDashboard({
                     </td>
                     <td className="py-3 px-4 text-right whitespace-nowrap">
                       <div className="inline-flex items-center gap-1">
-                        <button
-                          type="button"
-                          onClick={() => openBarcodeForBook(book.id)}
-                          aria-label={`Buat barcode ${book.title}`}
-                          title="Buat Barcode Buku"
-                          className="p-2 text-slate-500 dark:text-slate-400 hover:text-[#1A2B5E] dark:hover:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 rounded-md transition-colors cursor-pointer"
+                        <HoverPop
+                          as="span"
+                          className="inline-flex"
+                          placement="top"
+                          widthClass="w-48"
+                          content={
+                            <div className="text-[11px] font-medium text-slate-700 dark:text-slate-200">
+                              Tambah / Ubah Cover Buku
+                            </div>
+                          }
                         >
-                          <ScanBarcode className="w-4 h-4" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => openEditBookModal(book)}
-                          aria-label={`Edit ${book.title}`}
-                          title="Edit Buku"
-                          className="p-2 text-slate-500 dark:text-slate-400 hover:text-[#1A2B5E] dark:hover:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 rounded-md transition-colors cursor-pointer"
+                          <button
+                            type="button"
+                            onClick={() => openCoverMenuModal(book)}
+                            aria-label={`Ubah cover ${book.title}`}
+                            className="p-2 text-slate-500 dark:text-slate-400 hover:text-[#1A2B5E] dark:hover:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 rounded-md transition-colors cursor-pointer hover-pop-subtle"
+                          >
+                            <ImagePlus className="w-4 h-4" />
+                          </button>
+                        </HoverPop>
+                        <HoverPop
+                          as="span"
+                          className="inline-flex"
+                          placement="top"
+                          widthClass="w-48"
+                          content={
+                            <div className="text-[11px] font-medium text-slate-700 dark:text-slate-200">
+                              Buat & Cetak Barcode Buku
+                            </div>
+                          }
                         >
-                          <Pencil className="w-4 h-4" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onDeleteBook(book.id)}
-                          aria-label={`Hapus ${book.title}`}
-                          title="Hapus Buku"
-                          className="p-2 text-slate-500 dark:text-slate-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/50 rounded-md transition-colors cursor-pointer"
+                          <button
+                            type="button"
+                            onClick={() => openBarcodeForBook(book.id)}
+                            aria-label={`Buat barcode ${book.title}`}
+                            className="p-2 text-slate-500 dark:text-slate-400 hover:text-[#1A2B5E] dark:hover:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 rounded-md transition-colors cursor-pointer hover-pop-subtle"
+                          >
+                            <ScanBarcode className="w-4 h-4" />
+                          </button>
+                        </HoverPop>
+                        <HoverPop
+                          as="span"
+                          className="inline-flex"
+                          placement="top"
+                          widthClass="w-44"
+                          content={
+                            <div className="text-[11px] font-medium text-slate-700 dark:text-slate-200">
+                              Edit Metadata Koleksi
+                            </div>
+                          }
                         >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                          <button
+                            type="button"
+                            onClick={() => openEditBookModal(book)}
+                            aria-label={`Edit ${book.title}`}
+                            className="p-2 text-slate-500 dark:text-slate-400 hover:text-[#1A2B5E] dark:hover:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 rounded-md transition-colors cursor-pointer hover-pop-subtle"
+                          >
+                            <Pencil className="w-4 h-4" />
+                          </button>
+                        </HoverPop>
+                        <HoverPop
+                          as="span"
+                          className="inline-flex"
+                          placement="top"
+                          widthClass="w-44"
+                          content={
+                            <div className="text-[11px] font-medium text-red-700 dark:text-red-300">
+                              Hapus Buku dari Katalog
+                            </div>
+                          }
+                        >
+                          <button
+                            type="button"
+                            onClick={() => onDeleteBook(book.id)}
+                            aria-label={`Hapus ${book.title}`}
+                            className="p-2 text-slate-500 dark:text-slate-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/50 rounded-md transition-colors cursor-pointer hover-pop-subtle"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </HoverPop>
                       </div>
                     </td>
                   </tr>
@@ -1370,6 +1684,83 @@ export function AdminDashboard({
                     </div>
                   </div>
                   <div className="sm:col-span-2">
+                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                      Cover Buku (Unggah Gambar, Pilih Template, atau URL)
+                    </label>
+                    <div className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-[#F6F7FA]/80 dark:bg-[#0B0F17] space-y-3">
+                      <div className="flex items-start gap-3">
+                        <BookCover
+                          src={bookForm.coverUrl}
+                          title={bookForm.title || 'Pratinjau Cover'}
+                          className="w-16 h-24 rounded-md shrink-0 border border-slate-200 dark:border-slate-700 shadow-xs"
+                        />
+                        <div className="flex-1 min-w-0 space-y-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <label className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-[#1A2B5E] hover:bg-[#132047] dark:bg-indigo-600 dark:hover:bg-indigo-500 rounded-lg cursor-pointer">
+                              <ImagePlus className="w-3.5 h-3.5" />
+                              <span>Unggah Gambar Cover</span>
+                              <input
+                                type="file"
+                                accept="image/png,image/jpeg,image/webp"
+                                onChange={handleBookFormCoverUpload}
+                                className="sr-only"
+                              />
+                            </label>
+                            {bookForm.coverUrl && (
+                              <button
+                                type="button"
+                                onClick={() => setBookForm({ ...bookForm, coverUrl: '' })}
+                                className="px-2.5 py-1.5 text-xs font-medium text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg hover:bg-slate-50 cursor-pointer"
+                              >
+                                Pakai Default Kategori
+                              </button>
+                            )}
+                          </div>
+                          <input
+                            type="text"
+                            value={bookForm.coverUrl.startsWith('data:') ? '' : bookForm.coverUrl}
+                            onChange={(e) =>
+                              setBookForm({ ...bookForm, coverUrl: e.target.value })
+                            }
+                            placeholder={
+                              bookForm.coverUrl.startsWith('data:')
+                                ? 'Gambar custom telah diunggah (siap disimpan)'
+                                : 'Atau tempel URL gambar cover (https://...)'
+                            }
+                            className="w-full px-3 py-1.5 text-xs bg-white dark:bg-[#111723] border border-slate-200 dark:border-slate-800 rounded-lg text-slate-900 dark:text-slate-100 focus:outline-none focus:border-[#1A2B5E] dark:focus:border-indigo-500"
+                          />
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 overflow-x-auto pb-0.5">
+                        <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400 shrink-0">
+                          Template:
+                        </span>
+                        {COVER_PRESETS.map((preset) => (
+                          <button
+                            key={preset.url}
+                            type="button"
+                            onClick={() => setBookForm({ ...bookForm, coverUrl: preset.url })}
+                            title={preset.label}
+                            className={`p-0.5 rounded border transition-all shrink-0 cursor-pointer ${
+                              bookForm.coverUrl === preset.url
+                                ? 'border-[#1A2B5E] ring-2 ring-[#1A2B5E]/30 dark:border-indigo-400'
+                                : 'border-slate-200 dark:border-slate-700 opacity-80 hover:opacity-100'
+                            }`}
+                          >
+                            <img
+                              src={preset.url}
+                              alt={preset.label}
+                              className="w-7 h-10 object-cover rounded-xs"
+                            />
+                          </button>
+                        ))}
+                      </div>
+                      {bookFormError && (
+                        <p className="text-xs text-red-600 dark:text-red-400">{bookFormError}</p>
+                      )}
+                    </div>
+                  </div>
+                  <div className="sm:col-span-2">
                     <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
                       Sinopsis Singkat
                     </label>
@@ -1413,6 +1804,178 @@ export function AdminDashboard({
                       : editingBook
                       ? 'Simpan Perubahan'
                       : 'Simpan Buku'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* Dedicated Add / Manage Book Cover Modal */}
+        {coverModalOpen && (
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="cover-modal-title"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55 dark:bg-black/75 backdrop-blur-xs p-4"
+            onClick={() => {
+              if (!coverSaving) setCoverModalOpen(false);
+            }}
+          >
+            <div
+              className="bg-white dark:bg-[#111723] border border-slate-200/90 dark:border-slate-800 rounded-2xl w-full max-w-lg shadow-xl overflow-hidden max-h-[90vh] flex flex-col"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-800">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-9 h-9 rounded-lg bg-[#1A2B5E] dark:bg-indigo-600 text-white flex items-center justify-center shrink-0">
+                    <ImagePlus className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h2
+                      id="cover-modal-title"
+                      className="text-base font-bold text-slate-900 dark:text-slate-100"
+                    >
+                      Tambah & Kelola Cover Buku
+                    </h2>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      Unggah foto sampul baru, masukkan URL, atau pilih template cover
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={coverSaving}
+                  onClick={() => setCoverModalOpen(false)}
+                  className="p-1.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 rounded-md cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <form onSubmit={handleSaveCoverMenu} className="p-6 space-y-4 overflow-y-auto">
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
+                    Pilih Buku Koleksi
+                  </label>
+                  <select
+                    value={coverBookId}
+                    onChange={(e) => handleCoverBookChange(e.target.value)}
+                    className="w-full px-3 py-2 text-sm bg-white dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-lg text-slate-900 dark:text-slate-100 focus:outline-none focus:border-[#1A2B5E] dark:focus:border-indigo-500"
+                  >
+                    {books.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.title} ({b.category})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="p-4 rounded-xl bg-[#F6F7FA] dark:bg-[#0B0F17] border border-slate-200/80 dark:border-slate-800 flex items-center gap-4">
+                  <BookCover
+                    src={coverDraftUrl}
+                    title={books.find((b) => b.id === coverBookId)?.title ?? 'Cover Buku'}
+                    className="w-24 h-36 rounded-lg shrink-0 border border-slate-200 dark:border-slate-700 shadow-sm"
+                  />
+                  <div className="flex-1 min-w-0 space-y-2.5">
+                    <div className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">
+                      {books.find((b) => b.id === coverBookId)?.title ?? 'Pilih buku'}
+                    </div>
+                    <label className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-[#1A2B5E] hover:bg-[#132047] dark:bg-indigo-600 dark:hover:bg-indigo-500 rounded-lg cursor-pointer">
+                      <ImagePlus className="w-3.5 h-3.5" />
+                      <span>Unggah Foto Cover (PNG/JPG/WEBP)</span>
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp"
+                        onChange={handleCoverModalFileUpload}
+                        className="sr-only"
+                      />
+                    </label>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                      Gambar otomatis dikompresi ke resolusi sampul yang optimal.
+                    </p>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
+                    Atau Tempel URL Gambar Cover
+                  </label>
+                  <input
+                    type="text"
+                    value={coverDraftUrl.startsWith('data:') ? '' : coverDraftUrl}
+                    onChange={(e) => {
+                      setCoverError(null);
+                      setCoverDraftUrl(e.target.value);
+                    }}
+                    placeholder={
+                      coverDraftUrl.startsWith('data:')
+                        ? 'Gambar custom dari perangkat siap disimpan'
+                        : 'https://contoh.com/sampul-buku.jpg'
+                    }
+                    className="w-full px-3 py-2 text-sm bg-white dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-lg text-slate-900 dark:text-slate-100 focus:outline-none focus:border-[#1A2B5E] dark:focus:border-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-medium text-slate-700 dark:text-slate-300">
+                      Pilih Template Cover Bawaan
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setCoverDraftUrl('')}
+                      className="text-[11px] font-medium text-[#1A2B5E] dark:text-indigo-400 hover:underline cursor-pointer"
+                    >
+                      Reset Default Kategori
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-6 gap-2">
+                    {COVER_PRESETS.map((preset) => (
+                      <button
+                        key={preset.url}
+                        type="button"
+                        onClick={() => {
+                          setCoverError(null);
+                          setCoverDraftUrl(preset.url);
+                        }}
+                        className={`p-1 rounded-lg border text-center transition-all cursor-pointer ${
+                          coverDraftUrl === preset.url
+                            ? 'border-[#1A2B5E] ring-2 ring-[#1A2B5E]/25 dark:border-indigo-400 bg-indigo-50/40 dark:bg-indigo-950/30'
+                            : 'border-slate-200 dark:border-slate-800 hover:border-slate-300'
+                        }`}
+                        title={preset.label}
+                      >
+                        <img
+                          src={preset.url}
+                          alt={preset.label}
+                          className="w-full h-16 object-cover rounded-sm"
+                        />
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {coverError && (
+                  <p className="text-xs text-red-600 dark:text-red-400">{coverError}</p>
+                )}
+
+                <div className="flex items-center justify-end gap-3 pt-2 border-t border-slate-100 dark:border-slate-800">
+                  <button
+                    type="button"
+                    disabled={coverSaving}
+                    onClick={() => setCoverModalOpen(false)}
+                    className="px-4 py-2 text-sm font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 cursor-pointer"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={coverSaving}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white bg-[#1A2B5E] hover:bg-[#132047] dark:bg-indigo-600 dark:hover:bg-indigo-500 rounded-lg disabled:opacity-50 cursor-pointer"
+                  >
+                    <ImagePlus className="w-4 h-4" />
+                    <span>{coverSaving ? 'Menyimpan...' : 'Simpan Cover Buku'}</span>
                   </button>
                 </div>
               </form>
