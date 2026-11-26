@@ -11,6 +11,7 @@ import {
   Plus,
   Printer,
   Radio,
+  Receipt,
   RefreshCw,
   ScanBarcode,
   Search,
@@ -73,6 +74,7 @@ interface AdminDashboardProps {
   onReturnLoan: (loanId: string) => Promise<void>;
   onExtendLoan: (loanId: string) => Promise<void>;
   onPayFine: (loanId: string) => Promise<void>;
+  onRejectFineProof: (loanId: string, reason: string) => Promise<void>;
   onCancelReservation: (reservationId: string) => Promise<void>;
   onCreateMember: (payload: {
     name: string;
@@ -126,6 +128,7 @@ export function AdminDashboard({
   onReturnLoan,
   onExtendLoan,
   onPayFine,
+  onRejectFineProof,
   onCancelReservation,
   onCreateMember,
   onUpdateMember,
@@ -176,6 +179,10 @@ export function AdminDashboard({
   });
   const [deleteMemberTarget, setDeleteMemberTarget] = useState<Member | null>(null);
   const [deletingMemberBusy, setDeletingMemberBusy] = useState(false);
+  const [reviewFineLoanId, setReviewFineLoanId] = useState<string | null>(null);
+  const [rejectReason, setRejectReason] = useState('');
+  const [fineReviewBusy, setFineReviewBusy] = useState(false);
+  const [fineReviewError, setFineReviewError] = useState<string | null>(null);
   const [submittingActionId, setSubmittingActionId] = useState<string | null>(null);
   const [barcodeTargetBookId, setBarcodeTargetBookId] = useState<string | null>(null);
 
@@ -240,6 +247,19 @@ export function AdminDashboard({
   const activeReservations = useMemo(
     () => reservations.filter((r) => r.status === 'waiting' || r.status === 'ready'),
     [reservations]
+  );
+
+  const pendingFineProofLoans = useMemo(
+    () =>
+      loans.filter(
+        (l) => l.fineAmount > 0 && !l.finePaid && l.finePaymentStatus === 'pending_verification'
+      ),
+    [loans]
+  );
+
+  const liveReviewFineLoan = useMemo(
+    () => loans.find((l) => l.id === reviewFineLoanId) ?? null,
+    [loans, reviewFineLoanId]
   );
 
   const selectedReport =
@@ -470,6 +490,273 @@ export function AdminDashboard({
             <Trash2 className="w-4 h-4" />
             <span>{deletingMemberBusy ? 'Menghapus...' : 'Ya, Hapus Anggota'}</span>
           </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  function openFineReviewModal(loan: Loan) {
+    setReviewFineLoanId(loan.id);
+    setRejectReason('');
+    setFineReviewError(null);
+  }
+
+  async function handleVerifyFineFromModal() {
+    if (!liveReviewFineLoan) return;
+    setFineReviewBusy(true);
+    setFineReviewError(null);
+    try {
+      await onPayFine(liveReviewFineLoan.id);
+      setReviewFineLoanId(null);
+    } catch (err) {
+      setFineReviewError(
+        err instanceof Error ? err.message : 'Gagal memverifikasi pembayaran denda.'
+      );
+    } finally {
+      setFineReviewBusy(false);
+    }
+  }
+
+  async function handleRejectFineFromModal() {
+    if (!liveReviewFineLoan) return;
+    const reason = rejectReason.trim();
+    if (reason.length < 4) {
+      setFineReviewError('Tuliskan alasan penolakan minimal 4 karakter agar anggota dapat memperbaiki bukti.');
+      return;
+    }
+    setFineReviewBusy(true);
+    setFineReviewError(null);
+    try {
+      await onRejectFineProof(liveReviewFineLoan.id, reason);
+      setReviewFineLoanId(null);
+    } catch (err) {
+      setFineReviewError(
+        err instanceof Error ? err.message : 'Gagal menolak bukti pembayaran.'
+      );
+    } finally {
+      setFineReviewBusy(false);
+    }
+  }
+
+  const safeProofImageUrl =
+    liveReviewFineLoan?.finePaymentProof?.proofImageDataUrl &&
+    /^data:image\/(png|jpeg|jpg|webp);base64,[A-Za-z0-9+/=]+$/.test(
+      liveReviewFineLoan.finePaymentProof.proofImageDataUrl
+    )
+      ? liveReviewFineLoan.finePaymentProof.proofImageDataUrl
+      : '';
+
+  const fineReviewModal = liveReviewFineLoan ? (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="fine-review-title"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 dark:bg-black/80 backdrop-blur-xs p-4 overflow-y-auto"
+      onClick={() => {
+        if (!fineReviewBusy) setReviewFineLoanId(null);
+      }}
+    >
+      <div
+        className="bg-white dark:bg-[#111723] border border-slate-200/90 dark:border-slate-800 rounded-2xl w-full max-w-2xl shadow-xl overflow-hidden my-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-800">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200/80 dark:border-indigo-800 flex items-center justify-center text-[#1A2B5E] dark:text-indigo-400 shrink-0">
+              <Receipt className="w-5 h-5" />
+            </div>
+            <div>
+              <h2
+                id="fine-review-title"
+                className="text-base font-bold text-slate-950 dark:text-slate-50"
+              >
+                Verifikasi Bukti Pembayaran Denda
+              </h2>
+              <p className="text-xs font-mono text-slate-500 dark:text-slate-400 mt-0.5">
+                {liveReviewFineLoan.loanCode} · {liveReviewFineLoan.memberName} ({liveReviewFineLoan.memberCode})
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            disabled={fineReviewBusy}
+            onClick={() => setReviewFineLoanId(null)}
+            aria-label="Tutup modal verifikasi"
+            className="p-1.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 rounded-md cursor-pointer disabled:opacity-40"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="p-6 space-y-5 max-h-[75vh] overflow-y-auto">
+          {/* Loan & Fine Summary */}
+          <div className="p-4 rounded-xl bg-[#F6F7FA] dark:bg-[#0B0F17] border border-slate-200/80 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-xs text-slate-500 dark:text-slate-400">Buku Terkait</div>
+              <div className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate">
+                {liveReviewFineLoan.bookTitle}
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="text-xs text-slate-500 dark:text-slate-400">Nominal Denda</div>
+              <div className="text-lg font-bold font-mono tabular-nums text-red-600 dark:text-red-400">
+                {formatRupiah(liveReviewFineLoan.fineAmount)}
+              </div>
+            </div>
+          </div>
+
+          {liveReviewFineLoan.finePaymentProof ? (
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-5 items-start">
+              <div className="md:col-span-6 space-y-3 text-xs">
+                <div className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 space-y-2.5 bg-white dark:bg-[#0B0F17]/60">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-500 dark:text-slate-400">Status</span>
+                    {liveReviewFineLoan.finePaid ? (
+                      <span className="font-semibold text-emerald-700 dark:text-emerald-400">
+                        Terverifikasi Lunas
+                      </span>
+                    ) : liveReviewFineLoan.finePaymentStatus === 'pending_verification' ? (
+                      <span className="font-semibold text-amber-700 dark:text-amber-400">
+                        Menunggu Verifikasi
+                      </span>
+                    ) : (
+                      <span className="font-semibold text-red-600 dark:text-red-400">
+                        Bukti Ditolak
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-500 dark:text-slate-400">Metode</span>
+                    <span className="font-semibold text-slate-900 dark:text-slate-100">
+                      {liveReviewFineLoan.finePaymentProof.method === 'qris'
+                        ? 'QRIS Instan'
+                        : 'Transfer Rekening'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-500 dark:text-slate-400">Tujuan</span>
+                    <span className="font-medium text-slate-800 dark:text-slate-200 text-right">
+                      {liveReviewFineLoan.finePaymentProof.channelLabel}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-500 dark:text-slate-400">No. Referensi</span>
+                    <span className="font-mono font-semibold text-slate-900 dark:text-slate-100">
+                      {liveReviewFineLoan.finePaymentProof.referenceCode}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-500 dark:text-slate-400">Pengirim</span>
+                    <span className="font-medium text-slate-900 dark:text-slate-100">
+                      {liveReviewFineLoan.finePaymentProof.payerName}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-slate-500 dark:text-slate-400">Diunggah</span>
+                    <span className="font-mono text-slate-600 dark:text-slate-300">
+                      {formatDateTimeId(liveReviewFineLoan.finePaymentProof.submittedAt)}
+                    </span>
+                  </div>
+                  {liveReviewFineLoan.finePaymentProof.notes && (
+                    <div className="pt-2 border-t border-slate-100 dark:border-slate-800">
+                      <span className="text-slate-500 dark:text-slate-400 block mb-1">
+                        Catatan Anggota
+                      </span>
+                      <p className="text-slate-700 dark:text-slate-300 leading-relaxed">
+                        {liveReviewFineLoan.finePaymentProof.notes}
+                      </p>
+                    </div>
+                  )}
+                  {liveReviewFineLoan.finePaymentProof.rejectionReason && (
+                    <div className="pt-2 border-t border-slate-100 dark:border-slate-800">
+                      <span className="text-red-600 dark:text-red-400 font-medium block mb-0.5">
+                        Alasan Penolakan Sebelumnya
+                      </span>
+                      <p className="text-red-700 dark:text-red-300">
+                        {liveReviewFineLoan.finePaymentProof.rejectionReason}
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {!liveReviewFineLoan.finePaid && (
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
+                      Alasan Penolakan (isi jika bukti ditolak)
+                    </label>
+                    <input
+                      type="text"
+                      value={rejectReason}
+                      onChange={(e) => setRejectReason(e.target.value)}
+                      placeholder="Contoh: Nominal transfer kurang atau resi buram"
+                      className="w-full px-3 py-2 text-xs bg-white dark:bg-[#0B0F17] border border-slate-200 dark:border-slate-800 rounded-lg text-slate-900 dark:text-slate-100 focus:outline-none focus:border-[#1A2B5E] dark:focus:border-indigo-500"
+                    />
+                  </div>
+                )}
+              </div>
+
+              <div className="md:col-span-6">
+                <div className="text-xs font-medium text-slate-600 dark:text-slate-300 mb-1.5">
+                  Lampiran Bukti Bayar ({liveReviewFineLoan.finePaymentProof.proofFileName})
+                </div>
+                {safeProofImageUrl ? (
+                  <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-[#0B0F17] p-2 flex items-center justify-center">
+                    <img
+                      src={safeProofImageUrl}
+                      alt={`Bukti pembayaran ${liveReviewFineLoan.loanCode}`}
+                      className="max-h-72 w-auto rounded-lg object-contain"
+                    />
+                  </div>
+                ) : (
+                  <div className="rounded-xl border border-slate-200 dark:border-slate-800 p-6 text-center text-xs text-slate-500">
+                    Gambar bukti tidak tersedia.
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm text-slate-600 dark:text-slate-300">
+              Anggota belum mengunggah bukti pembayaran elektronik untuk pinjaman ini.
+            </p>
+          )}
+
+          {fineReviewError && (
+            <div className="p-3 rounded-lg bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-900 text-xs text-red-700 dark:text-red-300">
+              {fineReviewError}
+            </div>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center justify-end gap-2.5 px-6 py-4 bg-[#F6F7FA]/80 dark:bg-[#0B0F17]/60 border-t border-slate-200/80 dark:border-slate-800">
+          <button
+            type="button"
+            disabled={fineReviewBusy}
+            onClick={() => setReviewFineLoanId(null)}
+            className="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 rounded-lg cursor-pointer disabled:opacity-50"
+          >
+            Tutup
+          </button>
+          {!liveReviewFineLoan.finePaid && liveReviewFineLoan.finePaymentProof && (
+            <button
+              type="button"
+              disabled={fineReviewBusy}
+              onClick={handleRejectFineFromModal}
+              className="px-4 py-2 text-sm font-semibold text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800 hover:bg-red-100 dark:hover:bg-red-900/50 rounded-lg cursor-pointer disabled:opacity-50"
+            >
+              {fineReviewBusy ? 'Memproses...' : 'Tolak Bukti'}
+            </button>
+          )}
+          {!liveReviewFineLoan.finePaid && (
+            <button
+              type="button"
+              disabled={fineReviewBusy}
+              onClick={handleVerifyFineFromModal}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg cursor-pointer disabled:opacity-50"
+            >
+              <CheckCircle2 className="w-4 h-4" />
+              <span>{fineReviewBusy ? 'Memproses...' : 'Konfirmasi Lunas'}</span>
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -1216,6 +1503,33 @@ export function AdminDashboard({
           </div>
         </div>
 
+        {/* Pending Fine Proof Verification Strip */}
+        {pendingFineProofLoans.length > 0 && (
+          <div className="bg-amber-50/80 dark:bg-amber-950/30 border border-amber-200/90 dark:border-amber-800/80 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-lg bg-amber-100 dark:bg-amber-900/60 flex items-center justify-center text-amber-800 dark:text-amber-300 shrink-0">
+                <Receipt className="w-4 h-4" />
+              </div>
+              <div>
+                <p className="text-sm font-semibold text-amber-950 dark:text-amber-100">
+                  {pendingFineProofLoans.length} bukti pembayaran denda menunggu verifikasi admin
+                </p>
+                <p className="text-xs text-amber-800 dark:text-amber-300 mt-0.5">
+                  Periksa bukti transfer rekening atau QRIS dari anggota sebelum mengonfirmasi lunas.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => openFineReviewModal(pendingFineProofLoans[0])}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-[#1A2B5E] hover:bg-[#132047] dark:bg-indigo-600 dark:hover:bg-indigo-500 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Receipt className="w-3.5 h-3.5" />
+              <span>Cek Bukti Pertama</span>
+            </button>
+          </div>
+        )}
+
         {/* Loans Table */}
         <div className="bg-white dark:bg-[#111723] border border-slate-200/90 dark:border-slate-800 rounded-xl overflow-hidden">
           <div className="overflow-x-auto">
@@ -1304,11 +1618,19 @@ export function AdminDashboard({
                           >
                             {formatRupiah(loan.fineAmount)}
                           </span>
-                          {loan.finePaid && (
+                          {loan.finePaid ? (
                             <div className="text-[11px] text-emerald-700 dark:text-emerald-400">
                               Lunas
                             </div>
-                          )}
+                          ) : loan.finePaymentStatus === 'pending_verification' ? (
+                            <div className="text-[11px] font-medium text-amber-700 dark:text-amber-400">
+                              Menunggu Verifikasi
+                            </div>
+                          ) : loan.finePaymentStatus === 'rejected' ? (
+                            <div className="text-[11px] font-medium text-red-600 dark:text-red-400">
+                              Bukti Ditolak
+                            </div>
+                          ) : null}
                         </div>
                       ) : (
                         <span className="text-slate-500 dark:text-slate-400">Rp 0</span>
@@ -1316,6 +1638,24 @@ export function AdminDashboard({
                     </td>
                     <td className="py-3 px-4 text-right whitespace-nowrap">
                       <div className="inline-flex items-center gap-2">
+                        {loan.finePaymentProof && (
+                          <button
+                            type="button"
+                            onClick={() => openFineReviewModal(loan)}
+                            className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded-md cursor-pointer ${
+                              loan.finePaymentStatus === 'pending_verification'
+                                ? 'text-white bg-[#1A2B5E] hover:bg-[#132047] dark:bg-indigo-600 dark:hover:bg-indigo-500'
+                                : 'text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:bg-slate-200/70'
+                            }`}
+                          >
+                            <Receipt className="w-3.5 h-3.5" />
+                            <span>
+                              {loan.finePaymentStatus === 'pending_verification'
+                                ? 'Cek Bukti'
+                                : 'Bukti'}
+                            </span>
+                          </button>
+                        )}
                         {loan.fineAmount > 0 && !loan.finePaid && (
                           <button
                             type="button"
@@ -1783,6 +2123,7 @@ export function AdminDashboard({
           </div>
         )}
         {deleteMemberConfirmModal}
+        {fineReviewModal}
       </div>
     );
   }

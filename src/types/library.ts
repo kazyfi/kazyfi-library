@@ -42,6 +42,23 @@ export interface Member {
 
 export type LoanStatus = 'active' | 'overdue' | 'returned';
 
+export type FinePaymentMethod = 'bank_transfer' | 'qris';
+export type FinePaymentStatus = 'unpaid' | 'pending_verification' | 'verified' | 'rejected';
+
+export interface FinePaymentProof {
+  method: FinePaymentMethod;
+  channelLabel: string;
+  referenceCode: string;
+  proofImageDataUrl: string;
+  proofFileName: string;
+  payerName: string;
+  notes?: string;
+  submittedAt: string;
+  verifiedAt?: string | null;
+  verifiedBy?: string | null;
+  rejectionReason?: string | null;
+}
+
 export interface Loan {
   id: string;
   loanCode: string;
@@ -58,6 +75,8 @@ export interface Loan {
   extendedCount: number;
   fineAmount: number;
   finePaid?: boolean;
+  finePaymentStatus?: FinePaymentStatus;
+  finePaymentProof?: FinePaymentProof | null;
   status: LoanStatus;
   notes?: string;
 }
@@ -91,7 +110,9 @@ export type ActivityType =
   | 'loan:created'
   | 'loan:returned'
   | 'loan:extended'
+  | 'fine:submitted'
   | 'fine:paid'
+  | 'fine:rejected'
   | 'book:created'
   | 'book:updated'
   | 'book:deleted'

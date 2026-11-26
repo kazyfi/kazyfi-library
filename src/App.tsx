@@ -21,6 +21,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { AccessibilityModal } from './components/AccessibilityModal';
 import { AdminDashboard, type AdminTab } from './components/AdminDashboard';
 import { AdminLoginModal } from './components/AdminLoginModal';
+import type { SubmitFineProofPayload } from './components/FinePaymentModal';
 import { MemberDashboard, type MemberTab } from './components/MemberDashboard';
 import type {
   AccessibilityPrefs,
@@ -322,6 +323,36 @@ export default function App() {
       pushToast('success', 'Denda keterlambatan ditandai lunas.');
     } catch (err) {
       pushToast('error', err instanceof Error ? err.message : 'Gagal memproses pelunasan denda.');
+      throw err;
+    }
+  }
+
+  async function handleSubmitFineProof(loanId: string, payload: SubmitFineProofPayload) {
+    try {
+      await apiCall(`/api/loans/${loanId}/submit-fine-proof`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      pushToast(
+        'success',
+        'Bukti pembayaran denda berhasil dikirim. Menunggu verifikasi Admin.'
+      );
+    } catch (err) {
+      pushToast('error', err instanceof Error ? err.message : 'Gagal mengirim bukti pembayaran.');
+      throw err;
+    }
+  }
+
+  async function handleRejectFineProof(loanId: string, reason: string) {
+    try {
+      await apiCall(`/api/loans/${loanId}/reject-fine-proof`, {
+        method: 'POST',
+        body: JSON.stringify({ reason }),
+      });
+      pushToast('success', 'Bukti pembayaran ditandai perlu diperbarui oleh anggota.');
+    } catch (err) {
+      pushToast('error', err instanceof Error ? err.message : 'Gagal menolak bukti pembayaran.');
+      throw err;
     }
   }
 
@@ -824,6 +855,7 @@ export default function App() {
               onReturnLoan={handleReturnLoan}
               onExtendLoan={handleExtendLoan}
               onPayFine={handlePayFine}
+              onRejectFineProof={handleRejectFineProof}
               onCancelReservation={handleCancelReservation}
               onCreateMember={handleCreateMember}
               onUpdateMember={handleUpdateMember}
@@ -845,6 +877,7 @@ export default function App() {
               onBorrowBook={handleCreateLoan}
               onReturnLoan={handleReturnLoan}
               onExtendLoan={handleExtendLoan}
+              onSubmitFineProof={handleSubmitFineProof}
               onReserveBook={handleReserveBook}
               onCancelReservation={handleCancelReservation}
               onToggleBookmark={handleToggleBookmark}

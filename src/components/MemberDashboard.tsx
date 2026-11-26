@@ -10,6 +10,7 @@ import {
   MessageSquare,
   QrCode,
   Radio,
+  Receipt,
   Search,
   Square,
   Star,
@@ -26,6 +27,7 @@ import type {
 } from '../types/library';
 import { formatDateId, formatRupiah, getDueCountdownText } from '../utils/format';
 import { BookCover } from './BookCover';
+import { FinePaymentModal, type SubmitFineProofPayload } from './FinePaymentModal';
 
 export type MemberTab = 'catalog' | 'my-loans' | 'history';
 
@@ -44,6 +46,7 @@ interface MemberDashboardProps {
   onCancelReservation: (reservationId: string) => Promise<void>;
   onToggleBookmark: (memberId: string, bookId: string) => Promise<void>;
   onSubmitReview: (bookId: string, payload: { rating: number; comment: string }) => Promise<void>;
+  onSubmitFineProof: (loanId: string, payload: SubmitFineProofPayload) => Promise<void>;
   onNavigateTab: (tab: MemberTab) => void;
 }
 
@@ -73,6 +76,7 @@ export function MemberDashboard({
   onCancelReservation,
   onToggleBookmark,
   onSubmitReview,
+  onSubmitFineProof,
   onNavigateTab,
 }: MemberDashboardProps) {
   const [searchQuery, setSearchQuery] = useState('');
@@ -87,12 +91,18 @@ export function MemberDashboard({
   const [reviewRating, setReviewRating] = useState(5);
   const [reviewComment, setReviewComment] = useState('');
   const [reviewBusy, setReviewBusy] = useState(false);
+  const [fineModalLoanId, setFineModalLoanId] = useState<string | null>(null);
 
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   const selectedBook = useMemo(
     () => books.find((b) => b.id === selectedBookId) ?? null,
     [books, selectedBookId]
+  );
+
+  const liveFineModalLoan = useMemo(
+    () => loans.find((l) => l.id === fineModalLoanId) ?? null,
+    [loans, fineModalLoanId]
   );
 
   // Keyboard shortcut '/' to jump to search input in Catalog
@@ -150,6 +160,11 @@ export function MemberDashboard({
     [activeLoans]
   );
 
+  const unpaidFineLoans = useMemo(
+    () => memberLoans.filter((l) => l.fineAmount > 0 && !l.finePaid),
+    [memberLoans]
+  );
+
   const memberReservations = useMemo(
     () =>
       reservations.filter(
@@ -195,9 +210,7 @@ export function MemberDashboard({
     const totalRead = returnedLoans.length;
     const onTimeCount = returnedLoans.filter((l) => l.fineAmount === 0).length;
     const onTimePct = totalRead > 0 ? Math.round((onTimeCount / totalRead) * 100) : 100;
-    const currentFineTotal = activeLoans
-      .filter((l) => !l.finePaid)
-      .reduce((s, l) => s + l.fineAmount, 0);
+    const currentFineTotal = unpaidFineLoans.reduce((s, l) => s + l.fineAmount, 0);
 
     const catCount = new Map<string, number>();
     for (const loan of memberLoans) {
@@ -222,7 +235,7 @@ export function MemberDashboard({
       currentFineTotal,
       topCategory,
     };
-  }, [memberLoans, returnedLoans, activeLoans, books]);
+  }, [memberLoans, returnedLoans, unpaidFineLoans, books]);
 
   function toggleAudioReader(book: Book) {
     if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
@@ -291,6 +304,15 @@ export function MemberDashboard({
       setReviewBusy(false);
     }
   }
+
+  const finePaymentModalNode = (
+    <FinePaymentModal
+      loan={liveFineModalLoan}
+      memberName={currentMember.name}
+      onClose={() => setFineModalLoanId(null)}
+      onSubmit={onSubmitFineProof}
+    />
+  );
 
   // =========================================================================
   // TAB 1: MEMBER CATALOG, DIGITAL CARD & SELF-BORROWING
@@ -372,6 +394,11 @@ export function MemberDashboard({
                   Perhatian: {overdueLoans.length} pinjaman melewati jatuh tempo (estimasi denda{' '}
                   {formatRupiah(personalStats.currentFineTotal)}).
                 </p>
+              ) : unpaidFineLoans.length > 0 ? (
+                <p className="text-amber-700 dark:text-amber-400 font-medium">
+                  Terdapat {unpaidFineLoans.length} tagihan denda keterlambatan belum lunas sebesar{' '}
+                  {formatRupiah(personalStats.currentFineTotal)}.
+                </p>
               ) : activeLoans.length > 0 ? (
                 <p className="text-slate-600 dark:text-slate-300">
                   Pinjaman terdekat jatuh tempo: &ldquo;{activeLoans[0].bookTitle}&rdquo; (
@@ -381,6 +408,27 @@ export function MemberDashboard({
                 <p className="text-slate-500 dark:text-slate-400">
                   Tidak ada pinjaman jatuh tempo. Anda memiliki kuota penuh untuk meminjam hingga 3 buku.
                 </p>
+              )}
+              {unpaidFineLoans.length > 0 && (
+                <div className="pt-1.5 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      unpaidFineLoans.length === 1
+                        ? setFineModalLoanId(unpaidFineLoans[0].id)
+                        : onNavigateTab('my-loans')
+                    }
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-[#1A2B5E] hover:bg-[#132047] dark:bg-indigo-600 dark:hover:bg-indigo-500 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <Receipt className="w-3.5 h-3.5" />
+                    <span>Bayar Denda (Rekening / QRIS)</span>
+                  </button>
+                  {unpaidFineLoans.some((l) => l.finePaymentStatus === 'pending_verification') && (
+                    <span className="text-[11px] font-medium text-amber-700 dark:text-amber-400">
+                      · Ada bukti pembayaran menunggu verifikasi admin
+                    </span>
+                  )}
+                </div>
               )}
             </div>
           </div>
@@ -841,6 +889,7 @@ export function MemberDashboard({
             </div>
           </div>
         )}
+        {finePaymentModalNode}
       </div>
     );
   }
@@ -884,11 +933,99 @@ export function MemberDashboard({
           </div>
         )}
 
+        {unpaidFineLoans.length > 0 && (
+          <div className="bg-white dark:bg-[#111723] border border-slate-200/90 dark:border-slate-800 rounded-xl overflow-hidden">
+            <div className="px-5 py-3.5 border-b border-slate-200/80 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 bg-[#F6F7FA]/80 dark:bg-[#0B0F17]/60">
+              <div className="flex items-center gap-2">
+                <Receipt className="w-4 h-4 text-[#1A2B5E] dark:text-indigo-400" />
+                <h2 className="text-sm font-semibold text-slate-950 dark:text-slate-50">
+                  Tagihan Denda Keterlambatan ({unpaidFineLoans.length})
+                </h2>
+              </div>
+              <span className="text-xs font-mono tabular-nums font-semibold text-red-600 dark:text-red-400">
+                Total: {formatRupiah(personalStats.currentFineTotal)}
+              </span>
+            </div>
+            <div className="divide-y divide-slate-100 dark:divide-slate-800">
+              {unpaidFineLoans.map((loan) => {
+                const isPending = loan.finePaymentStatus === 'pending_verification';
+                const isRejected = loan.finePaymentStatus === 'rejected';
+                return (
+                  <div
+                    key={`fine-${loan.id}`}
+                    className="px-5 py-3.5 flex flex-wrap items-center justify-between gap-3"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-mono text-xs text-slate-500 dark:text-slate-400">
+                          {loan.loanCode}
+                        </span>
+                        <span className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate">
+                          {loan.bookTitle}
+                        </span>
+                        {isPending ? (
+                          <span className="px-2 py-0.5 text-[11px] font-semibold rounded-md bg-amber-50 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 border border-amber-200/80 dark:border-amber-800">
+                            Menunggu Verifikasi Admin
+                          </span>
+                        ) : isRejected ? (
+                          <span className="px-2 py-0.5 text-[11px] font-semibold rounded-md bg-red-50 dark:bg-red-950/50 text-red-700 dark:text-red-300 border border-red-200/80 dark:border-red-800">
+                            Bukti Ditolak
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 text-[11px] font-semibold rounded-md bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                            Belum Dibayar
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                        {loan.status === 'returned'
+                          ? `Dikembalikan ${formatDateId(loan.returnedAt)}`
+                          : 'Pinjaman masih berjalan · Tarik denda Rp 2.000/hari'}
+                        {isRejected && loan.finePaymentProof?.rejectionReason && (
+                          <span className="text-red-600 dark:text-red-400 font-medium">
+                            {' '}· Alasan: {loan.finePaymentProof.rejectionReason}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      <span className="font-mono tabular-nums text-sm font-bold text-red-600 dark:text-red-400">
+                        {formatRupiah(loan.fineAmount)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setFineModalLoanId(loan.id)}
+                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                          isPending
+                            ? 'text-[#1A2B5E] dark:text-indigo-300 bg-indigo-50/80 dark:bg-indigo-950/50 border border-indigo-200 dark:border-indigo-800 hover:bg-indigo-100 dark:hover:bg-indigo-900/60'
+                            : 'text-white bg-[#1A2B5E] hover:bg-[#132047] dark:bg-indigo-600 dark:hover:bg-indigo-500'
+                        }`}
+                      >
+                        <Receipt className="w-3.5 h-3.5" />
+                        <span>
+                          {isPending
+                            ? 'Lihat Bukti Bayar'
+                            : isRejected
+                            ? 'Unggah Ulang Bukti'
+                            : 'Bayar (Rekening / QRIS)'}
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {/* Active Loans Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {activeLoans.map((loan) => {
             const book = books.find((b) => b.id === loan.bookId);
             const isOverdue = loan.status === 'overdue';
+            const hasUnpaidFine = loan.fineAmount > 0 && !loan.finePaid;
+            const isPendingProof = loan.finePaymentStatus === 'pending_verification';
             return (
               <div
                 key={loan.id}
@@ -933,14 +1070,26 @@ export function MemberDashboard({
                       </span>
                       <span>Tempo: {formatDateId(loan.dueAt)}</span>
                     </div>
-                    {loan.fineAmount > 0 && !loan.finePaid && (
-                      <p className="text-xs font-mono tabular-nums font-semibold text-red-600 dark:text-red-400 mt-1.5">
-                        Denda berjalan: {formatRupiah(loan.fineAmount)}
-                      </p>
+                    {hasUnpaidFine && (
+                      <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                        <span className="text-xs font-mono tabular-nums font-semibold text-red-600 dark:text-red-400">
+                          Denda berjalan: {formatRupiah(loan.fineAmount)}
+                        </span>
+                        {isPendingProof && (
+                          <span className="text-[11px] font-medium text-amber-700 dark:text-amber-400">
+                            (Bukti dikirim · Menunggu verifikasi)
+                          </span>
+                        )}
+                        {loan.finePaymentStatus === 'rejected' && (
+                          <span className="text-[11px] font-medium text-red-600 dark:text-red-400">
+                            (Bukti ditolak)
+                          </span>
+                        )}
+                      </div>
                     )}
                   </div>
 
-                  <div className="flex items-center gap-2 pt-3 mt-3 border-t border-slate-100 dark:border-slate-800">
+                  <div className="flex flex-wrap items-center gap-2 pt-3 mt-3 border-t border-slate-100 dark:border-slate-800">
                     {!isOverdue && loan.extendedCount === 0 && (
                       <button
                         type="button"
@@ -956,6 +1105,16 @@ export function MemberDashboard({
                         className="px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 hover:bg-slate-50 rounded-lg cursor-pointer"
                       >
                         Perpanjang (+7 Hari)
+                      </button>
+                    )}
+                    {hasUnpaidFine && (
+                      <button
+                        type="button"
+                        onClick={() => setFineModalLoanId(loan.id)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-[#1A2B5E] hover:bg-[#132047] dark:bg-indigo-600 dark:hover:bg-indigo-500 rounded-lg whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        <Receipt className="w-3.5 h-3.5" />
+                        <span>{isPendingProof ? 'Lihat Bukti' : 'Bayar Denda'}</span>
                       </button>
                     )}
                     <button
@@ -1056,6 +1215,7 @@ export function MemberDashboard({
             </p>
           )}
         </div>
+        {finePaymentModalNode}
       </div>
     );
   }
@@ -1112,22 +1272,35 @@ export function MemberDashboard({
           </p>
         </div>
 
-        <div className="bg-white dark:bg-[#111723] border border-slate-200/90 dark:border-slate-800 rounded-xl p-5">
-          <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
-            Denda Belum Lunas
-          </p>
-          <p
-            className={`text-2xl font-bold font-mono tabular-nums mt-2 ${
-              personalStats.currentFineTotal > 0
-                ? 'text-red-600 dark:text-red-400'
-                : 'text-slate-950 dark:text-slate-50'
-            }`}
-          >
-            {formatRupiah(personalStats.currentFineTotal)}
-          </p>
-          <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">
-            Tarif keterlambatan Rp 2.000/hari
-          </p>
+        <div className="bg-white dark:bg-[#111723] border border-slate-200/90 dark:border-slate-800 rounded-xl p-5 flex flex-col justify-between">
+          <div>
+            <p className="text-xs font-medium text-slate-500 dark:text-slate-400">
+              Denda Belum Lunas
+            </p>
+            <p
+              className={`text-2xl font-bold font-mono tabular-nums mt-2 ${
+                personalStats.currentFineTotal > 0
+                  ? 'text-red-600 dark:text-red-400'
+                  : 'text-slate-950 dark:text-slate-50'
+              }`}
+            >
+              {formatRupiah(personalStats.currentFineTotal)}
+            </p>
+          </div>
+          {unpaidFineLoans.length > 0 ? (
+            <button
+              type="button"
+              onClick={() => setFineModalLoanId(unpaidFineLoans[0].id)}
+              className="mt-3 inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-[#1A2B5E] hover:bg-[#132047] dark:bg-indigo-600 dark:hover:bg-indigo-500 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Receipt className="w-3.5 h-3.5" />
+              <span>Bayar via Rekening / QRIS</span>
+            </button>
+          ) : (
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">
+              Tarif keterlambatan Rp 2.000/hari
+            </p>
+          )}
         </div>
       </div>
 
@@ -1149,59 +1322,110 @@ export function MemberDashboard({
                 <th className="py-3 px-4">Tgl Kembali</th>
                 <th className="py-3 px-4">Status</th>
                 <th className="py-3 px-4 text-right">Denda</th>
+                <th className="py-3 px-4 text-right">Pembayaran Denda</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800/80">
-              {memberLoans.map((loan) => (
-                <tr key={loan.id} className="hover:bg-indigo-50/30 dark:hover:bg-indigo-950/20 transition-colors">
-                  <td className="py-3.5 px-4 font-mono tabular-nums text-xs text-slate-600 dark:text-slate-300">
-                    {loan.loanCode}
-                  </td>
-                  <td className="py-3.5 px-4">
-                    <div className="font-medium text-slate-900 dark:text-slate-100">
-                      {loan.bookTitle}
-                    </div>
-                    <div className="text-xs text-slate-500 dark:text-slate-400">
-                      {loan.bookAuthor}
-                    </div>
-                  </td>
-                  <td className="py-3.5 px-4 font-mono tabular-nums text-xs text-slate-600 dark:text-slate-300">
-                    {formatDateId(loan.borrowedAt)}
-                  </td>
-                  <td className="py-3.5 px-4 font-mono tabular-nums text-xs text-slate-600 dark:text-slate-300">
-                    {formatDateId(loan.dueAt)}
-                  </td>
-                  <td className="py-3.5 px-4 font-mono tabular-nums text-xs text-slate-600 dark:text-slate-300">
-                    {formatDateId(loan.returnedAt)}
-                  </td>
-                  <td className="py-3.5 px-4 text-xs font-medium">
-                    {loan.status === 'returned' ? (
-                      <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400">
-                        <CheckCircle2 className="w-3.5 h-3.5" />
-                        Dikembalikan
-                      </span>
-                    ) : loan.status === 'overdue' ? (
-                      <span className="inline-flex items-center gap-1 text-red-600 dark:text-red-400">
-                        <AlertTriangle className="w-3.5 h-3.5" />
-                        Terlambat
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1 text-[#1A2B5E] dark:text-indigo-400">
-                        <Clock className="w-3.5 h-3.5" />
-                        Dipinjam
-                      </span>
-                    )}
-                  </td>
-                  <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs text-slate-700 dark:text-slate-300">
-                    {formatRupiah(loan.fineAmount)}
-                    {loan.finePaid ? ' (Lunas)' : ''}
-                  </td>
-                </tr>
-              ))}
+              {memberLoans.map((loan) => {
+                const isPending = loan.finePaymentStatus === 'pending_verification';
+                const isRejected = loan.finePaymentStatus === 'rejected';
+                return (
+                  <tr
+                    key={loan.id}
+                    className="hover:bg-indigo-50/30 dark:hover:bg-indigo-950/20 transition-colors"
+                  >
+                    <td className="py-3.5 px-4 font-mono tabular-nums text-xs text-slate-600 dark:text-slate-300">
+                      {loan.loanCode}
+                    </td>
+                    <td className="py-3.5 px-4">
+                      <div className="font-medium text-slate-900 dark:text-slate-100">
+                        {loan.bookTitle}
+                      </div>
+                      <div className="text-xs text-slate-500 dark:text-slate-400">
+                        {loan.bookAuthor}
+                      </div>
+                    </td>
+                    <td className="py-3.5 px-4 font-mono tabular-nums text-xs text-slate-600 dark:text-slate-300">
+                      {formatDateId(loan.borrowedAt)}
+                    </td>
+                    <td className="py-3.5 px-4 font-mono tabular-nums text-xs text-slate-600 dark:text-slate-300">
+                      {formatDateId(loan.dueAt)}
+                    </td>
+                    <td className="py-3.5 px-4 font-mono tabular-nums text-xs text-slate-600 dark:text-slate-300">
+                      {formatDateId(loan.returnedAt)}
+                    </td>
+                    <td className="py-3.5 px-4 text-xs font-medium">
+                      {loan.status === 'returned' ? (
+                        <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400">
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          Dikembalikan
+                        </span>
+                      ) : loan.status === 'overdue' ? (
+                        <span className="inline-flex items-center gap-1 text-red-600 dark:text-red-400">
+                          <AlertTriangle className="w-3.5 h-3.5" />
+                          Terlambat
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-[#1A2B5E] dark:text-indigo-400">
+                          <Clock className="w-3.5 h-3.5" />
+                          Dipinjam
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs text-slate-700 dark:text-slate-300">
+                      {formatRupiah(loan.fineAmount)}
+                      {loan.finePaid ? ' (Lunas)' : ''}
+                    </td>
+                    <td className="py-3.5 px-4 text-right whitespace-nowrap">
+                      {loan.fineAmount > 0 ? (
+                        loan.finePaid ? (
+                          loan.finePaymentProof ? (
+                            <button
+                              type="button"
+                              onClick={() => setFineModalLoanId(loan.id)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 hover:bg-emerald-100 rounded-md cursor-pointer"
+                            >
+                              <Receipt className="w-3.5 h-3.5" />
+                              <span>Lihat Bukti</span>
+                            </button>
+                          ) : (
+                            <span className="text-xs font-medium text-emerald-700 dark:text-emerald-400">
+                              Lunas
+                            </span>
+                          )
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setFineModalLoanId(loan.id)}
+                            className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded-md cursor-pointer ${
+                              isPending
+                                ? 'text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 hover:bg-amber-100'
+                                : isRejected
+                                ? 'text-white bg-red-600 hover:bg-red-700'
+                                : 'text-white bg-[#1A2B5E] hover:bg-[#132047] dark:bg-indigo-600 dark:hover:bg-indigo-500'
+                            }`}
+                          >
+                            <Receipt className="w-3.5 h-3.5" />
+                            <span>
+                              {isPending
+                                ? 'Menunggu Verifikasi'
+                                : isRejected
+                                ? 'Unggah Ulang'
+                                : 'Bayar Denda'}
+                            </span>
+                          </button>
+                        )
+                      ) : (
+                        <span className="text-xs text-slate-400 dark:text-slate-500">—</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
               {memberLoans.length === 0 && (
                 <tr>
                   <td
-                    colSpan={7}
+                    colSpan={8}
                     className="py-10 text-center text-sm text-slate-500 dark:text-slate-400"
                   >
                     Belum ada riwayat peminjaman.
@@ -1212,6 +1436,7 @@ export function MemberDashboard({
           </table>
         </div>
       </div>
+      {finePaymentModalNode}
     </div>
   );
 }

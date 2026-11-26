@@ -11,6 +11,8 @@ import type {
   BookReview,
   CategoryDistributionPoint,
   DailyCirculationPoint,
+  FinePaymentMethod,
+  FinePaymentProof,
   LibraryStatistics,
   Loan,
   Member,
@@ -863,6 +865,10 @@ function normalizeLoadedState(rawState: Partial<DatabaseState>): DatabaseState {
       ? rawState.loans.map((l) => ({
           ...l,
           finePaid: Boolean(l.finePaid),
+          finePaymentStatus: l.finePaid
+            ? 'verified'
+            : l.finePaymentStatus ?? 'unpaid',
+          finePaymentProof: l.finePaymentProof ?? null,
         }))
       : seed.loans,
     reservations: Array.isArray(rawState.reservations) ? rawState.reservations : [],
@@ -1039,7 +1045,7 @@ function issueAdminSessionResponse(username: string) {
 export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) {
   const db = loadDatabase();
   const app = express();
-  app.use(express.json({ limit: '256kb' }));
+  app.use(express.json({ limit: '1mb' }));
 
   const sseClients = new Set<Response>();
 
@@ -1925,6 +1931,80 @@ export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) 
     res.json({ loan, sync });
   });
 
+  app.post('/api/loans/:id/submit-fine-proof', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const loan = db.loans.find((l) => l.id === req.params.id);
+    if (!loan) {
+      res.status(404).json({ error: 'Transaksi peminjaman tidak ditemukan.' });
+      return;
+    }
+    if (req.session!.role !== 'admin' && loan.memberId !== req.session!.userId) {
+      res.status(403).json({ error: 'Anda tidak memiliki izin untuk membayar denda pinjaman ini.' });
+      return;
+    }
+
+    reconcileLoansAndBooks(db);
+    if (loan.fineAmount <= 0 || loan.finePaid) {
+      res.status(400).json({ error: 'Tidak ada tagihan denda yang perlu dibayar pada transaksi ini.' });
+      return;
+    }
+
+    const rawMethod = req.body?.method;
+    if (rawMethod !== 'bank_transfer' && rawMethod !== 'qris') {
+      res.status(400).json({ error: 'Metode pembayaran harus Transfer Rekening atau QRIS.' });
+      return;
+    }
+    const method: FinePaymentMethod = rawMethod;
+    const channelLabel = sanitizeText(req.body?.channelLabel, 80);
+    const referenceCode = sanitizeText(req.body?.referenceCode, 64);
+    const payerName = sanitizeText(req.body?.payerName, 80) || req.session!.name;
+    const notes = sanitizeText(req.body?.notes, 200);
+    const proofFileName = sanitizeText(req.body?.proofFileName, 80) || 'bukti-pembayaran.jpg';
+    const rawProofImage = typeof req.body?.proofImageDataUrl === 'string' ? req.body.proofImageDataUrl.trim() : '';
+
+    if (!channelLabel || referenceCode.length < 3) {
+      res.status(400).json({
+        error: 'Tujuan pembayaran dan nomor referensi transaksi (minimal 3 karakter) wajib diisi.',
+      });
+      return;
+    }
+
+    const validImagePattern = /^data:image\/(png|jpeg|jpg|webp);base64,[A-Za-z0-9+/=]+$/;
+    if (!validImagePattern.test(rawProofImage) || rawProofImage.length > 650_000) {
+      res.status(400).json({
+        error: 'Bukti pembayaran harus berupa gambar PNG, JPG, atau WEBP dengan ukuran maksimal ~450KB.',
+      });
+      return;
+    }
+
+    const proof: FinePaymentProof = {
+      method,
+      channelLabel,
+      referenceCode,
+      proofImageDataUrl: rawProofImage,
+      proofFileName,
+      payerName,
+      notes: notes || undefined,
+      submittedAt: new Date().toISOString(),
+      verifiedAt: null,
+      verifiedBy: null,
+      rejectionReason: null,
+    };
+
+    loan.finePaymentStatus = 'pending_verification';
+    loan.finePaymentProof = proof;
+
+    const methodText = method === 'qris' ? 'QRIS' : 'Transfer Rekening';
+    const activity = recordActivity(
+      'fine:submitted',
+      req.session!.name,
+      req.session!.role,
+      `Mengunggah bukti bayar denda (${methodText}): Rp ${loan.fineAmount.toLocaleString('id-ID')}`,
+      `Kode ${loan.loanCode} · Ref ${referenceCode}`
+    );
+    const sync = emitFullSync('fine:submitted', activity);
+    res.json({ loan, sync });
+  });
+
   app.post('/api/loans/:id/pay-fine', requireAuth, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
     const loan = db.loans.find((l) => l.id === req.params.id);
     if (!loan) {
@@ -1936,6 +2016,12 @@ export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) 
       return;
     }
     loan.finePaid = true;
+    loan.finePaymentStatus = 'verified';
+    if (loan.finePaymentProof) {
+      loan.finePaymentProof.verifiedAt = new Date().toISOString();
+      loan.finePaymentProof.verifiedBy = req.session!.name;
+      loan.finePaymentProof.rejectionReason = null;
+    }
     const activity = recordActivity(
       'fine:paid',
       req.session!.name,
@@ -1944,6 +2030,36 @@ export function createApiApp(options?: { enableBackgroundScheduler?: boolean }) 
       `Kode ${loan.loanCode} · ${loan.bookTitle}`
     );
     const sync = emitFullSync('fine:paid', activity);
+    res.json({ loan, sync });
+  });
+
+  app.post('/api/loans/:id/reject-fine-proof', requireAuth, requireAdmin, (req: AuthenticatedRequest, res: Response) => {
+    const loan = db.loans.find((l) => l.id === req.params.id);
+    if (!loan) {
+      res.status(404).json({ error: 'Transaksi tidak ditemukan.' });
+      return;
+    }
+    if (!loan.finePaymentProof || loan.finePaid) {
+      res.status(400).json({ error: 'Tidak ada bukti pembayaran tertunda pada transaksi ini.' });
+      return;
+    }
+    const reason =
+      sanitizeText(req.body?.reason, 200) ||
+      'Bukti transfer atau nominal tidak sesuai. Silakan unggah ulang bukti yang jelas.';
+    loan.finePaid = false;
+    loan.finePaymentStatus = 'rejected';
+    loan.finePaymentProof.rejectionReason = reason;
+    loan.finePaymentProof.verifiedAt = new Date().toISOString();
+    loan.finePaymentProof.verifiedBy = req.session!.name;
+
+    const activity = recordActivity(
+      'fine:rejected',
+      req.session!.name,
+      'admin',
+      `Menolak bukti bayar denda (${loan.memberName}): ${loan.loanCode}`,
+      reason
+    );
+    const sync = emitFullSync('fine:rejected', activity);
     res.json({ loan, sync });
   });
 
